@@ -17,6 +17,12 @@ proc requireDb(backend: SqliteBackend): DbConn =
 proc execSql(db: DbConn; query: SqlQuery; args: varargs[string, `$`]) =
   db.exec(query, args)
 
+proc applyPerformancePragmas(db: DbConn) =
+  discard db.getValue(sql"PRAGMA journal_mode = WAL")
+  db.execSql(sql"PRAGMA synchronous = NORMAL")
+  db.execSql(sql"PRAGMA busy_timeout = 5000")
+  db.execSql(sql"PRAGMA temp_store = MEMORY")
+
 proc isBlockedTask(payload: JsonNode; blockedTasks: openArray[string]): bool =
   if blockedTasks.len == 0 or "taskName" notin payload:
     return false
@@ -30,6 +36,7 @@ method setup*(backend: SqliteBackend; basePath: string; queues: openArray[string
     discard existsOrCreateDir(basePath)
     backend.dbPath = basePath / "quee.sqlite3"
     backend.db = open(backend.dbPath, "", "", "")
+    backend.db.applyPerformancePragmas()
     backend.db.execSql(sql"""
       CREATE TABLE IF NOT EXISTS jobs (
         queue TEXT NOT NULL,

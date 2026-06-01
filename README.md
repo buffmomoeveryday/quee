@@ -111,6 +111,15 @@ SQLite is built in and stores all queues in `{path}/quee.sqlite3`:
 initQuee("./mydb", backendKind = bkSqlite)
 ```
 
+The SQLite backend applies these pragmas on open:
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA busy_timeout = 5000;
+PRAGMA temp_store = MEMORY;
+```
+
 Custom backends subclass `QueueBackend` and pass an instance to `initQuee`. `claimDue` must atomically claim and remove one due job so concurrent workers cannot run the same payload twice:
 
 ```nim
