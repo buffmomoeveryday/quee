@@ -8,11 +8,27 @@
 ##   discard myJob.enqueue("hi").run()
 ##   startQuee()
 
-import quee/[types, registry, schedule, builder, worker, taskmacro, tasksyntax, log, priority]
+import quee/[
+  types,
+  backend,
+  limdbbackend,
+  sqlitebackend,
+  registry,
+  schedule,
+  builder,
+  worker,
+  taskmacro,
+  tasksyntax,
+  log,
+  priority,
+  jobkey,
+]
 
 export types
+export backend
+export limdbbackend
+export sqlitebackend
 export registry
-export openQueueDb
 export closeQueueDatabases
 export DefaultPollIntervalMs
 export DefaultWorkerConcurrency
@@ -32,3 +48,4 @@ export taskmacro
 export tasksyntax
 export log
 export priority
+export jobkey

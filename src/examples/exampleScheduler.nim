@@ -10,6 +10,7 @@ initQuee(
   queues = ["default", "fast", "slow", "critical"],
   pollIntervalMs = 50,
   workerConcurrency = 2,
+  backendKind = bkSqlite,
 )
 
 task echoEverySecond():

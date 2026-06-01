@@ -1,6 +1,5 @@
 import std/[json, random, strformat, times]
-import limdb
-import ./[types, registry, schedule, priority, jobkey]
+import ./[types, backend, registry, schedule, priority]
 
 proc newJobId(taskName: string): string =
   &"{epochTime()}_{taskName}_{rand(100_000)}"
@@ -27,11 +26,19 @@ proc priority*(b: JobBuilder, p: int): JobBuilder =
   result = b
   result.priority = p
 
+proc id*(b: JobBuilder): string =
+  ## Stable job id generated when the builder was created.
+  b.jobId
+
+proc cancel*(b: JobBuilder): bool =
+  ## Cancel this job if it is still queued, or request cooperative cancellation
+  ## if it is already running.
+  cancelJob(b.jobId, b.queueName)
+
 proc persistJob*(b: JobBuilder, schedule: JobSchedule): JobBuilder =
   var sched = schedule
   sched.runAt = computeInitialRunAt(sched)
 
-  let db = openQueueDb(b.dbPath)
   let jobData = %*{
     "id": b.jobId,
     "taskName": b.taskName,
@@ -43,8 +50,7 @@ proc persistJob*(b: JobBuilder, schedule: JobSchedule): JobBuilder =
   }
 
   withQueeDbLock:
-    db.withTransaction t:
-      t[jobStorageKey(jobData)] = $jobData
+    currentBackend().enqueue(b.queueName, jobData)
 
   result = b
   result.schedule = sched

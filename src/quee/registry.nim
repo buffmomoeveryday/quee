@@ -1,8 +1,7 @@
-import std/[json, locks, os, random, tables, terminal]
-import limdb
-import ./[types, log, priority, schedule, jobkey]
+import std/[locks, random, tables, terminal]
+import ./[types, log, priority, backend, limdbbackend, sqlitebackend]
 
-var queueDatabases = initTable[string, Database[string, string]]()
+var activeBackend: QueueBackend
 
 const
   DefaultPollIntervalMs* = 200
@@ -11,11 +10,21 @@ const
 
 var queeDbLock: Lock
 var queeDbLockInitialized = false
+var cancellationLock: Lock
+var cancellationLockInitialized = false
+var cancelledJobs = initTable[string, bool]()
+var runningJobs = initTable[string, bool]()
+var currentJobId {.threadvar.}: string
 
 proc initQueeDbLock*() =
   if not queeDbLockInitialized:
     initLock(queeDbLock)
     queeDbLockInitialized = true
+
+proc initCancellationLock() =
+  if not cancellationLockInitialized:
+    initLock(cancellationLock)
+    cancellationLockInitialized = true
 
 template withQueeDbLock*(body: untyped) =
   acquire(queeDbLock)
@@ -23,6 +32,14 @@ template withQueeDbLock*(body: untyped) =
     body
   finally:
     release(queeDbLock)
+
+template withCancellationLock(body: untyped) =
+  initCancellationLock()
+  acquire(cancellationLock)
+  try:
+    body
+  finally:
+    release(cancellationLock)
 
 var queeRegistry* {.global.}: QueeRegistry = QueeRegistry(
   handlers: initTable[string, TaskHandler](),
@@ -63,59 +80,106 @@ proc pollInterval*(): int =
   ## Current worker poll interval in milliseconds.
   queeRegistry.pollIntervalMs
 
-proc closeQueueDatabases*() =
-  ## Close all cached LMDB connections. Called on ``initQuee`` / ``resetQueeRegistry``.
-  for _, db in queueDatabases:
-    db.close()
-  queueDatabases.clear()
+proc newBackend*(kind: BackendKind): QueueBackend =
+  case kind
+  of bkLimdb:
+    newLimdbBackend()
+  of bkSqlite:
+    newSqliteBackend()
 
-proc openQueueDb*(path: string): Database[string, string] {.gcsafe.} =
-  ## Reuse one limdb environment per queue directory path.
+proc currentBackend*(): QueueBackend {.gcsafe.} =
   {.cast(gcsafe).}:
-    if path notin queueDatabases:
-      queueDatabases[path] = initDatabase(path)
-    queueDatabases[path]
+    if activeBackend == nil:
+      raise backendNotConfigured()
+    activeBackend
 
-proc discardMissedJobsInQueue(path: string): int =
-  let db = openQueueDb(path)
-  var deletes: seq[string] = @[]
-  var updates: seq[JsonNode] = @[]
+proc closeQueueDatabases*() =
+  ## Compatibility alias: close the currently configured backend.
+  if activeBackend != nil:
+    activeBackend.close()
 
-  db.withTransaction t:
-    for key, val in t.pairs:
-      if not isJobDue(val):
-        continue
+proc markJobRunning*(jobId: string) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    currentJobId = jobId
+    withCancellationLock:
+      runningJobs[jobId] = true
 
-      let payload = parseJson(val)
-      let sched =
-        if "schedule" in payload: scheduleFromJson(payload["schedule"])
-        else: JobSchedule(kind: skOnce)
+proc unmarkJobRunning*(jobId: string) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    currentJobId = ""
+    withCancellationLock:
+      runningJobs.del(jobId)
 
-      deletes.add(key)
-      if sched.kind != skOnce:
-        var next = payload
-        next["runAt"] = %computeNextRunAt(sched)
-        updates.add(next)
+proc currentJob*(): string {.gcsafe.} =
+  currentJobId
 
-    for key in deletes:
-      t.del(key)
-    for payload in updates:
-      t[jobStorageKey(payload)] = $payload
+proc requestJobCancellation(jobId: string) =
+  withCancellationLock:
+    cancelledJobs[jobId] = true
 
-  deletes.len
+proc clearJobCancellation*(jobId: string) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    withCancellationLock:
+      cancelledJobs.del(jobId)
+
+proc jobCancellationRequested*(jobId: string): bool {.gcsafe.} =
+  {.cast(gcsafe).}:
+    withCancellationLock:
+      result = jobId in cancelledJobs
+
+proc cancellationRequested*(): bool {.gcsafe.} =
+  let jobId = currentJobId
+  jobId.len > 0 and jobCancellationRequested(jobId)
+
+proc jobIsRunning(jobId: string): bool =
+  withCancellationLock:
+    result = jobId in runningJobs
+
+proc cancelJob*(jobId: string; queue: string = ""): bool =
+  ## Cancel a queued/scheduled job by id.
+  ##
+  ## If the job has not started yet, it is removed from the backend and will not run.
+  ## If it is already running, cancellation is cooperative: the handler should
+  ## check ``cancellationRequested()`` and return early.
+  if jobId.len == 0:
+    return false
+
+  var queues: seq[string] = @[]
+  if queue.len > 0:
+    if queue notin queeRegistry.queuePaths:
+      raise newException(ValueError, "Unknown queue: '" & queue & "'")
+    queues.add(queue)
+  else:
+    queues = queeRegistry.queues
+
+  var removed = false
+  withQueeDbLock:
+    let backend = currentBackend()
+    for queueName in queues:
+      if backend.cancel(queueName, jobId):
+        removed = true
+        break
+
+  if removed:
+    clearJobCancellation(jobId)
+    return true
+
+  requestJobCancellation(jobId)
+  if jobIsRunning(jobId):
+    return true
+
+  clearJobCancellation(jobId)
+  false
 
 proc discardMissedJobs*(): int =
   ## Drop jobs that are already due without running them.
   ##
   ## One-shot jobs are deleted. Recurring jobs are advanced to their next run
   ## time so app restarts/deploys do not catch up missed executions.
-  var paths: seq[string] = @[]
-  for _, path in queeRegistry.queuePaths:
-    paths.add(path)
-
   withQueeDbLock:
-    for path in paths:
-      result += discardMissedJobsInQueue(path)
+    let backend = currentBackend()
+    for queue in queeRegistry.queues:
+      result += backend.discardMissed(queue)
 
 proc dbPath*(queue: string = ""): string =
   let name =
@@ -140,33 +204,39 @@ proc initQuee*(
   pollIntervalMs: int = DefaultPollIntervalMs;
   workerConcurrency: int = DefaultWorkerConcurrency,
   skipMissedJobs: bool = false,
+  backendKind: BackendKind = bkLimdb,
+  backend: QueueBackend = nil,
 ) =
-  ## Open or create the job store. Each queue gets its own subdirectory under `path`.
+  ## Open or create the job store using the selected or provided backend.
   ##
   ## When ``skipMissedJobs`` is true, jobs already due at startup are skipped:
   ## one-shot jobs are deleted and recurring jobs are advanced to their next run.
   validatePollInterval(pollIntervalMs)
   validateWorkerConcurrency(workerConcurrency)
-  closeQueueDatabases()
-  discard existsOrCreateDir(path)
+  if "default" notin queues:
+    raise newException(ValueError, "queues must include \"default\"")
+
+  if activeBackend != nil:
+    activeBackend.close()
+  activeBackend =
+    if backend == nil: newBackend(backendKind)
+    else: backend
+  activeBackend.setup(path, queues)
+
   queeRegistry.basePath = path
   queeRegistry.queues = @queues
   queeRegistry.queuePaths.clear()
   queeRegistry.pollIntervalMs = pollIntervalMs
   queeRegistry.workerConcurrency = workerConcurrency
 
-  if "default" notin queues:
-    raise newException(ValueError, "queues must include \"default\"")
-
   queeRegistry.defaultQueue = "default"
 
   for name in queues:
-    let qpath = path / name
-    createDir qpath
-    queeRegistry.queuePaths[name] = qpath
+    queeRegistry.queuePaths[name] = activeBackend.storagePath(name)
 
   randomize()
   initQueeDbLock()
+  initCancellationLock()
 
   if skipMissedJobs:
     discard discardMissedJobs()
@@ -225,3 +295,6 @@ proc resetQueeRegistry*() =
   queeRegistry.basePath = ""
   queeRegistry.pollIntervalMs = DefaultPollIntervalMs
   queeRegistry.workerConcurrency = DefaultWorkerConcurrency
+  withCancellationLock:
+    cancelledJobs.clear()
+    runningJobs.clear()
