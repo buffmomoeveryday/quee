@@ -1,4 +1,5 @@
-import std/[json, os, times, unittest]
+import std/[json, os, strutils, times, unittest]
+import db_connector/db_sqlite
 import quee
 import helpers
 
@@ -107,6 +108,14 @@ suite "storage backends":
     check processOne()
     check processOne()
     check backendHits == @["high", "low"]
+
+  test "sqlite backend enables WAL journal mode":
+    initQuee(dbPath, backendKind = bkSqlite)
+    closeQueueDatabases()
+
+    let db = open(dbPath / "quee.sqlite3", "", "", "")
+    defer: db.close()
+    check db.getValue(sql"PRAGMA journal_mode").toLowerAscii() == "wal"
 
   test "sqlite backend cancels queued jobs":
     initQuee(dbPath, backendKind = bkSqlite)
