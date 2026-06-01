@@ -61,3 +61,8 @@ suite "computeInitialRunAt":
     let runAt = computeInitialRunAt(JobSchedule(kind: skEveryInterval, intervalSecs: 60.0))
     check runAt >= epochTime()
     check runAt <= epochTime() + 61.0
+
+  test "cron schedule advances to a future minute":
+    let runAt = computeInitialRunAt(JobSchedule(kind: skCron, cronExpr: "*/1 * * * *"))
+    check runAt > epochTime()
+    check runAt <= epochTime() + 61.0

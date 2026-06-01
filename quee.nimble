@@ -13,6 +13,7 @@ requires "nim >= 2.0.8"
 
 requires "malebolgia >= 0.1.0"
 requires "limdb"
+requires "db_connector"
 requires "mummy"
 
 # Tasks
@@ -20,7 +21,9 @@ task test, "Run the test suite":
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_schedule.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_queue.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_queues.nim"
+  exec "nim c -r --threads:on --mm:arc --path:src tests/test_backends.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_priority.nim"
+  exec "nim c -r --threads:on --mm:arc --path:src tests/test_cancel.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_poll.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_concurrency.nim"
 
@@ -39,6 +42,9 @@ task buildExamples, "Build all examples":
   exec "nim c --threads:on --mm:arc --path:src src/examples/priorityExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/queuesExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/workerConfigExample.nim"
+  exec "nim c --threads:on --mm:arc --path:src src/examples/deployUpdateExample.nim"
+  exec "nim c --threads:on --mm:arc --path:src src/examples/cancellationExample.nim"
+  exec "nim c --threads:on --mm:arc --path:src src/examples/backendExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/concurrencyExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/exampleScheduler.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/mummyWebServerExample.nim"

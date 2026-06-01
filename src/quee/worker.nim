@@ -1,79 +1,60 @@
-import std/[json, os, strutils, tables, times]
-import limdb
-import ./[types, registry, schedule, log, priority, jobkey]
+import std/[json, os, strutils, tables]
+import ./[types, backend, registry, schedule, log]
 
 var workerThreads: seq[Thread[void]]
 var workersRunning = false
 
-proc requeueRecurring(db: Database, payload: JsonNode) =
+proc nextRecurringPayload(payload: JsonNode): JsonNode =
   let sched = scheduleFromJson(payload["schedule"])
   if sched.kind == skOnce:
-    return
-  var next = payload
-  next["runAt"] = %computeNextRunAt(sched)
-  db.withTransaction t:
-    t[jobStorageKey(next)] = $next
+    return payload
+  result = payload
+  result["runAt"] = %computeNextRunAt(sched)
 
-proc processOneInQueue(path: string): bool =
-  var rawJob = ""
-  var storageKey = ""
-  var db: Database[string, string]
+proc processOneInQueue(queue: string): bool =
+  var payload: JsonNode
+  var runningJobId = ""
 
   withQueeDbLock:
-    db = openQueueDb(path)
-    db.withTransaction t:
-      var bestPri = MaxPriority + 1
-      for key, val in t.pairs:
-        if isJobStorageKey(key):
-          if isJobDue(val):
-            let pri = jobPriority(parseJson(val))
-            if rawJob.len == 0 or pri < bestPri:
-              rawJob = val
-              storageKey = key
-              bestPri = pri
-            break
-          continue
+    let claimed = currentBackend().claimDue(queue)
+    if claimed.id.len > 0:
+      payload = claimed.payload
+      runningJobId = claimed.id
+      markJobRunning(runningJobId)
 
-        if not isJobDue(val):
-          continue
-        let pri = jobPriority(parseJson(val))
-        if rawJob.len == 0 or pri < bestPri:
-          rawJob = val
-          storageKey = key
-          bestPri = pri
-      if rawJob.len > 0:
-        t.del(storageKey)
-
-  if rawJob.len == 0:
+  if runningJobId.len == 0:
     return false
 
-  let payload = parseJson(rawJob)
   let taskName = payload["taskName"].getStr()
   let sched =
     if "schedule" in payload: scheduleFromJson(payload["schedule"])
     else: JobSchedule(kind: skOnce)
 
-  {.cast(gcsafe).}:
-    if hasKey(queeRegistry.handlers, taskName):
-      queeRegistry.handlers[taskName](payload["args"])
-    else:
-      queeWarn("No handler registered for: " & taskName)
+  try:
+    {.cast(gcsafe).}:
+      if hasKey(queeRegistry.handlers, taskName):
+        queeRegistry.handlers[taskName](payload["args"])
+      else:
+        queeWarn("No handler registered for: " & taskName)
 
-  if sched.kind != skOnce:
-    withQueeDbLock:
-      requeueRecurring(db, payload)
+    if sched.kind != skOnce and not jobCancellationRequested(runningJobId):
+      withQueeDbLock:
+        currentBackend().requeue(queue, nextRecurringPayload(payload))
+  finally:
+    if runningJobId.len > 0:
+      unmarkJobRunning(runningJobId)
+      clearJobCancellation(runningJobId)
 
   true
 
 proc processOne*(): bool {.gcsafe.} =
-  var paths: seq[string] = @[]
+  var queues: seq[string] = @[]
 
   {.cast(gcsafe).}:
-    for _, path in queeRegistry.queuePaths:
-      paths.add(path)
+    queues = queeRegistry.queues
 
-  for path in paths:
-    if processOneInQueue(path):
+  for queue in queues:
+    if processOneInQueue(queue):
       return true
 
   false

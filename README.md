@@ -1,12 +1,13 @@
 # Quee
 
-A lightweight background job queue for Nim. Define tasks with a macro, enqueue work with a fluent API, and let a background worker persist and run jobs via [limdb](https://github.com/nim-lang/nimble) (LMDB).
+A lightweight background job queue for Nim. Define tasks with a macro, enqueue work with a fluent API, and let a background worker persist and run jobs through a pluggable storage backend.
 
 ## Features
 
 - **Task macro** — declare handlers with typed parameters
 - **Fluent scheduling** — run now, delay, intervals, cron, daily/weekly
-- **Durable storage** — jobs survive process restarts (LMDB on disk)
+- **Durable storage** — jobs survive process restarts with built-in LIMDB/LMDB or SQLite backends
+- **Pluggable backends** — provide a `QueueBackend` for Redis, Postgres, memory, or another store
 - **Background workers** — configurable thread pool (`concurrency`, like Celery `-c`) and poll interval
 - **HTTP-friendly** — works with frameworks like [mummy](https://github.com/nim-lang/mummy) (see below)
 
@@ -86,7 +87,49 @@ discard sendEmail.enqueue("a@b.com", queue = "urgent").run()
 
 Resolution: ``queue =`` at enqueue → task's ``queue "…"`` line → `"default"`.
 
-Each queue is stored under `{dbPath}/{queueName}/` (separate LMDB). The worker polls every queue round-robin.
+With the default LIMDB backend, each queue is stored under `{dbPath}/{queueName}/`. The worker polls every queue round-robin.
+
+## Storage Backends
+
+LIMDB/LMDB is the default backend:
+
+```nim
+initQuee("./mydb")
+# same as:
+initQuee("./mydb", backendKind = bkLimdb)
+```
+
+SQLite is built in and stores all queues in `{path}/quee.sqlite3`:
+
+```nim
+initQuee("./mydb", backendKind = bkSqlite)
+```
+
+Custom backends subclass `QueueBackend` and pass an instance to `initQuee`. `claimDue` must atomically claim and remove one due job so concurrent workers cannot run the same payload twice:
+
+```nim
+import std/json
+import quee
+
+type RedisBackend = ref object of QueueBackend
+  # client, prefix, etc.
+
+method setup(backend: RedisBackend; basePath: string; queues: openArray[string]) {.gcsafe.} =
+  discard
+
+method storagePath(backend: RedisBackend; queue: string): string {.gcsafe.} =
+  "redis://" & queue
+
+method enqueue(backend: RedisBackend; queue: string; payload: JsonNode) {.gcsafe.} =
+  discard # write payload using jobStorageKey(payload) or an equivalent ordered key
+
+method claimDue(backend: RedisBackend; queue: string): ClaimedJob {.gcsafe.} =
+  discard # atomically pop one due job; return default ClaimedJob when none is due
+
+initQuee("./mydb", backend = RedisBackend())
+```
+
+See `src/examples/backendExample.nim` for a complete custom in-memory backend.
 
 ### Job priority
 
@@ -160,6 +203,30 @@ Cron supports `*`, exact values, and `*/N` step syntax per field.
 
 Recurring jobs (interval, daily, weekly, cron) are **re-queued automatically** after each run. One-shot jobs (`.run()`, `.after()`, `.at()`) are removed after execution.
 
+## Cancellation
+
+Queued or scheduled jobs can be cancelled before they start:
+
+```nim
+let job = sendEmail.enqueue("a@b.com", "Welcome").after(5.minutes)
+discard job.cancel()
+
+# Or cancel later by id:
+discard cancelJob(job.id)
+```
+
+Running jobs use cooperative cancellation. The worker records the cancellation request, and the task should check `cancellationRequested()` at safe points:
+
+```nim
+task longJob():
+  for step in 1 .. 100:
+    if cancellationRequested():
+      return
+    doOneStep(step)
+```
+
+Quee does not forcibly kill a running thread; handlers must return voluntarily.
+
 ## Poll interval
 
 How long the worker sleeps when no due jobs are found (milliseconds). Default: **200**.
@@ -176,6 +243,17 @@ startQuee(50)          # override to 50 ms for this start (also updates stored i
 
 Lower values mean faster pickup of new jobs but more CPU wakeups.
 
+## Skipping missed jobs on deploy
+
+By default, jobs that became due while the app was stopped run when the worker starts again. For deploys where old due work should not catch up, initialize with `skipMissedJobs = true`:
+
+```nim
+initQuee("./mydb", skipMissedJobs = true)
+startQuee()
+```
+
+One-shot jobs that are already due are deleted. Recurring jobs that are already due are advanced to their next run time.
+
 ## Concurrency
 
 How many worker threads run jobs in parallel. Default: **1** (same as before). Similar to Celery's `celery -A app worker --concurrency=4`.
@@ -190,7 +268,7 @@ startQuee(concurrency = 4)       # override for this start
 startQuee(pollIntervalMs = 50, concurrency = 4)
 ```
 
-Each thread runs the same loop: claim a due job from LMDB (delete in a transaction), run the handler, repeat. With `concurrency > 1`, multiple handlers can run at once when multiple jobs are due.
+Each thread runs the same loop: atomically claim a due job from the configured backend, run the handler, repeat. With `concurrency > 1`, multiple handlers can run at once when multiple jobs are due.
 
 **Thread safety:** when `concurrency > 1`, task handlers must not mutate shared global state without synchronization (same expectation as Celery prefork/thread pools).
 
@@ -201,8 +279,25 @@ Calling `startQuee()` twice without `waitForQuee()` raises an error. Multi-proce
 ### Setup
 
 ```nim
-proc initQuee*(path: string; queues = ["default"]; pollIntervalMs = 200; workerConcurrency = 1)
-  ## Create/open the LMDB directory for job storage.
+proc initQuee*(
+  path: string;
+  queues = ["default"];
+  pollIntervalMs = 200;
+  workerConcurrency = 1;
+  skipMissedJobs = false;
+  backendKind = bkLimdb;
+  backend: QueueBackend = nil
+)
+  ## Create/open job storage with a built-in or custom backend.
+
+proc discardMissedJobs*(): int
+  ## Delete due one-shot jobs and advance due recurring jobs without running them.
+
+proc cancelJob*(jobId: string; queue = ""): bool
+  ## Cancel a queued job, or request cooperative cancellation for a running job.
+
+proc cancellationRequested*(): bool
+  ## True inside a running task after cancellation has been requested.
 
 proc setPollInterval*(ms: int)
   ## Set worker sleep when idle (ms). Minimum 1.
@@ -222,10 +317,35 @@ proc waitForQuee*()
   ## Block until all worker threads exit (runs forever in normal use).
 ```
 
+### Backends
+
+```nim
+type BackendKind = enum bkLimdb, bkSqlite
+type ClaimedJob = object
+  id: string
+  payload: JsonNode
+type QueueBackend = ref object of RootObj
+
+method setup(backend: QueueBackend; basePath: string; queues: openArray[string])
+method close(backend: QueueBackend)
+method storagePath(backend: QueueBackend; queue: string): string
+method enqueue(backend: QueueBackend; queue: string; payload: JsonNode)
+method claimDue(backend: QueueBackend; queue: string): ClaimedJob
+method requeue(backend: QueueBackend; queue: string; payload: JsonNode)
+method cancel(backend: QueueBackend; queue: string; jobId: string): bool
+method discardMissed(backend: QueueBackend; queue: string): int
+
+proc newLimdbBackend(): LimdbBackend
+proc newSqliteBackend(): SqliteBackend
+proc jobStorageKey(payload: JsonNode): string
+```
+
 ### Job builder (from `task.enqueue`)
 
 ```nim
 proc priority*(b: JobBuilder; p: int): JobBuilder   # 1 = highest, 10 = lowest
+proc id*(b: JobBuilder): string
+proc cancel*(b: JobBuilder): bool
 proc run*(b: JobBuilder): JobBuilder          # run ASAP
 proc after*(b: JobBuilder; delay: TimeInterval): JobBuilder
 proc at*(b: JobBuilder; time: DateTime): JobBuilder
@@ -289,7 +409,7 @@ nim c --threads:on --mm:arc --path:src -o:benchmarks/bench_quee benchmarks/bench
 
 | Scenario | What it measures |
 |----------|------------------|
-| **Enqueue (.run)** | Persisting jobs to LMDB via `enqueue().run()` |
+| **Enqueue (.run)** | Persisting jobs to the configured backend via `enqueue().run()` |
 | **processOne drain** | Claiming and running jobs in the main thread (no worker pool) |
 | **Worker E2E** | Full pipeline with `startQuee(concurrency=N)` until all jobs finish |
 
@@ -307,7 +427,7 @@ Example output:
   throughput: 3204 jobs/s
 ```
 
-Results depend on disk speed (LMDB), CPU, and `--threads:on`. Use the same machine to compare concurrency settings.
+Results depend on backend/disk speed, CPU, and `--threads:on`. Use the same machine to compare concurrency settings.
 
 ## Examples
 
@@ -325,8 +445,11 @@ nim c --threads:on --mm:arc --path:src src/examples/exampleScheduler.nim
 - `src/examples/priorityExample.nim` — default priority, runtime priority override, and priority order.
 - `src/examples/queuesExample.nim` — multiple queues, task queue defaults, runtime queue override, and task listing.
 - `src/examples/workerConfigExample.nim` — poll interval and concurrency configuration.
+- `src/examples/deployUpdateExample.nim` — skip missed jobs on app restart/deploy.
+- `src/examples/cancellationExample.nim` — cancel queued jobs and cooperatively stop a running job.
+- `src/examples/backendExample.nim` — switch between LIMDB, SQLite, and a custom backend.
 - `src/examples/concurrencyExample.nim` — background worker concurrency with slow simulated work.
-- `src/examples/exampleScheduler.nim` — long-running scheduler with interval, delayed, daily, weekly, queue, priority, poll interval, and concurrency usage.
+- `src/examples/exampleScheduler.nim` — long-running SQLite-backed scheduler with interval, delayed, daily, weekly, queue, priority, poll interval, and concurrency usage.
 - `src/examples/mummyWebServerExample.nim` — enqueue background work from a Mummy HTTP handler.
 
 ### Background scheduler
@@ -354,6 +477,9 @@ src/
   quee/
     types.nim           # TaskHandler, JobBuilder, schedules
     registry.nim        # initQuee, registerHandler, global state
+    backend.nim         # pluggable storage backend interface
+    limdbbackend.nim    # default LIMDB/LMDB backend
+    sqlitebackend.nim   # SQLite backend
     schedule.nim        # cron, run-at math, isJobDue
     builder.nim         # enqueue fluent API
     worker.nim          # background thread, processOne
@@ -363,6 +489,9 @@ src/
     priorityExample.nim
     queuesExample.nim
     workerConfigExample.nim
+    deployUpdateExample.nim
+    cancellationExample.nim
+    backendExample.nim
     concurrencyExample.nim
     exampleScheduler.nim
     mummyWebServerExample.nim
@@ -375,7 +504,7 @@ flowchart TB
   subgraph setup["Setup"]
     INIT["initQuee(path, queues)"]
     TASK["task myJob(...):\n  queue \"emails\"\n  priority 3\n  ...logic..."]
-    INIT --> DIRS["LMDB dirs per queue\n./mydb/default, ./emails, ..."]
+    INIT --> STORE["configured backend\nLIMDB, SQLite, custom"]
     TASK --> REG["registerTask(name, queue, handler)"]
   end
 
@@ -383,7 +512,7 @@ flowchart TB
     ENQ["myJob.enqueue(args, queue = ?, priority = ?)"]
     BUILD["JobBuilder"]
     RUN[".run() / .after() / .every() / .schedule()..."]
-    PERSIST["persistJob → LMDB"]
+    PERSIST["persistJob → backend"]
     ENQ --> BUILD --> RUN --> PERSIST
   end
 
@@ -402,8 +531,8 @@ flowchart TB
   end
 
   REG --> PRINT
-  PERSIST --> DIRS
-  DIRS --> LOOP
+  PERSIST --> STORE
+  STORE --> LOOP
 ```
 
 On `startQuee()`, Quee prints every registered task and its default queue, then starts the worker:

@@ -50,6 +50,24 @@ suite "enqueue and run":
     check processOne()
     check hitCount == 2
 
+  test "initQuee skipMissedJobs discards due one-shot jobs":
+    hitCount = 0
+    discard bumpCounter.enqueue().run()
+    initQuee(dbPath, skipMissedJobs = true)
+    check not processOne()
+    check hitCount == 0
+
+  test "initQuee skipMissedJobs advances recurring jobs":
+    hitCount = 0
+    discard bumpCounter.enqueue().every(100.milliseconds)
+    sleep(150)
+    initQuee(dbPath, skipMissedJobs = true)
+    check not processOne()
+    check hitCount == 0
+    sleep(150)
+    check processOne()
+    check hitCount == 1
+
 suite "startQuee worker":
   test "background worker runs jobs":
     hitCount = 0
