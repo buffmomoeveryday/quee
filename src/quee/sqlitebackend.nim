@@ -17,6 +17,14 @@ proc requireDb(backend: SqliteBackend): DbConn =
 proc execSql(db: DbConn; query: SqlQuery; args: varargs[string, `$`]) =
   db.exec(query, args)
 
+proc isBlockedTask(payload: JsonNode; blockedTasks: openArray[string]): bool =
+  if blockedTasks.len == 0 or "taskName" notin payload:
+    return false
+  let taskName = payload["taskName"].getStr()
+  for blocked in blockedTasks:
+    if blocked == taskName:
+      return true
+
 method setup*(backend: SqliteBackend; basePath: string; queues: openArray[string]) {.gcsafe.} =
   {.cast(gcsafe).}:
     discard existsOrCreateDir(basePath)
@@ -52,7 +60,9 @@ method enqueue*(backend: SqliteBackend; queue: string; payload: JsonNode) {.gcsa
       $payload,
     )
 
-method claimDue*(backend: SqliteBackend; queue: string): ClaimedJob {.gcsafe.} =
+method claimDue*(
+  backend: SqliteBackend; queue: string; blockedTasks: openArray[string]
+): ClaimedJob {.gcsafe.} =
   {.cast(gcsafe).}:
     let db = backend.requireDb()
     db.execSql(sql"BEGIN IMMEDIATE")
@@ -66,7 +76,10 @@ method claimDue*(backend: SqliteBackend; queue: string): ClaimedJob {.gcsafe.} =
         let val = row[1]
         if isJobStorageKey(key):
           if isJobDue(val):
-            let pri = jobPriority(parseJson(val))
+            let payload = parseJson(val)
+            if payload.isBlockedTask(blockedTasks):
+              continue
+            let pri = jobPriority(payload)
             if rawJob.len == 0 or pri < bestPri:
               rawJob = val
               storageKey = key
@@ -76,7 +89,10 @@ method claimDue*(backend: SqliteBackend; queue: string): ClaimedJob {.gcsafe.} =
 
         if not isJobDue(val):
           continue
-        let pri = jobPriority(parseJson(val))
+        let payload = parseJson(val)
+        if payload.isBlockedTask(blockedTasks):
+          continue
+        let pri = jobPriority(payload)
         if rawJob.len == 0 or pri < bestPri:
           rawJob = val
           storageKey = key

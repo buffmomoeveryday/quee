@@ -21,6 +21,14 @@ proc openDb(backend: LimdbBackend; queue: string): Database[string, string] =
     backend.queueDatabases[path] = initDatabase(path)
   backend.queueDatabases[path]
 
+proc isBlockedTask(payload: JsonNode; blockedTasks: openArray[string]): bool =
+  if blockedTasks.len == 0 or "taskName" notin payload:
+    return false
+  let taskName = payload["taskName"].getStr()
+  for blocked in blockedTasks:
+    if blocked == taskName:
+      return true
+
 method setup*(backend: LimdbBackend; basePath: string; queues: openArray[string]) {.gcsafe.} =
   {.cast(gcsafe).}:
     backend.basePath = basePath
@@ -49,7 +57,9 @@ method enqueue*(backend: LimdbBackend; queue: string; payload: JsonNode) {.gcsaf
     db.withTransaction t:
       t[jobStorageKey(payload)] = $payload
 
-method claimDue*(backend: LimdbBackend; queue: string): ClaimedJob {.gcsafe.} =
+method claimDue*(
+  backend: LimdbBackend; queue: string; blockedTasks: openArray[string]
+): ClaimedJob {.gcsafe.} =
   {.cast(gcsafe).}:
     let db = backend.openDb(queue)
     var rawJob = ""
@@ -59,7 +69,10 @@ method claimDue*(backend: LimdbBackend; queue: string): ClaimedJob {.gcsafe.} =
       for key, val in t.pairs:
         if isJobStorageKey(key):
           if isJobDue(val):
-            let pri = jobPriority(parseJson(val))
+            let payload = parseJson(val)
+            if payload.isBlockedTask(blockedTasks):
+              continue
+            let pri = jobPriority(payload)
             if rawJob.len == 0 or pri < bestPri:
               rawJob = val
               storageKey = key
@@ -69,7 +82,10 @@ method claimDue*(backend: LimdbBackend; queue: string): ClaimedJob {.gcsafe.} =
 
         if not isJobDue(val):
           continue
-        let pri = jobPriority(parseJson(val))
+        let payload = parseJson(val)
+        if payload.isBlockedTask(blockedTasks):
+          continue
+        let pri = jobPriority(payload)
         if rawJob.len == 0 or pri < bestPri:
           rawJob = val
           storageKey = key

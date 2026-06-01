@@ -16,6 +16,7 @@ initQuee(
 task echoEverySecond():
   queue "fast"
   priority 5
+  concurrency 2
   styledEcho fgGreen, "tick ", resetStyle, $now(), "\n"
 
 task echoAfterDelay(message: string):

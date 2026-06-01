@@ -14,6 +14,7 @@ var cancellationLock: Lock
 var cancellationLockInitialized = false
 var cancelledJobs = initTable[string, bool]()
 var runningJobs = initTable[string, bool]()
+var runningTaskCounts = initTable[string, int]()
 var currentJobId {.threadvar.}: string
 
 proc initQueeDbLock*() =
@@ -67,6 +68,16 @@ proc setWorkerConcurrency*(n: int) =
 proc workerConcurrency*(): int =
   queeRegistry.workerConcurrency
 
+const UnlimitedTaskConcurrency* = 0
+
+proc validateTaskConcurrency*(n: int) =
+  if n < UnlimitedTaskConcurrency or n > MaxWorkerConcurrency:
+    raise newException(
+      ValueError,
+      "task concurrency must be 0.." & $MaxWorkerConcurrency &
+        " (0 means unlimited), got " & $n,
+    )
+
 proc validatePollInterval*(ms: int) =
   if ms < 1:
     raise newException(ValueError, "poll interval must be at least 1 ms, got " & $ms)
@@ -98,17 +109,25 @@ proc closeQueueDatabases*() =
   if activeBackend != nil:
     activeBackend.close()
 
-proc markJobRunning*(jobId: string) {.gcsafe.} =
+proc markJobRunning*(jobId: string; taskName: string) {.gcsafe.} =
   {.cast(gcsafe).}:
     currentJobId = jobId
     withCancellationLock:
       runningJobs[jobId] = true
+      if taskName.len > 0:
+        runningTaskCounts[taskName] = runningTaskCounts.getOrDefault(taskName, 0) + 1
 
-proc unmarkJobRunning*(jobId: string) {.gcsafe.} =
+proc unmarkJobRunning*(jobId: string; taskName: string) {.gcsafe.} =
   {.cast(gcsafe).}:
     currentJobId = ""
     withCancellationLock:
       runningJobs.del(jobId)
+      if taskName.len > 0 and taskName in runningTaskCounts:
+        let next = runningTaskCounts[taskName] - 1
+        if next <= 0:
+          runningTaskCounts.del(taskName)
+        else:
+          runningTaskCounts[taskName] = next
 
 proc currentJob*(): string {.gcsafe.} =
   currentJobId
@@ -134,6 +153,15 @@ proc cancellationRequested*(): bool {.gcsafe.} =
 proc jobIsRunning(jobId: string): bool =
   withCancellationLock:
     result = jobId in runningJobs
+
+proc blockedTaskNames*(): seq[string] {.gcsafe.} =
+  ## Task names whose per-task concurrency limit is currently full.
+  {.cast(gcsafe).}:
+    withCancellationLock:
+      for taskName, info in queeRegistry.tasks:
+        if info.taskConcurrency > UnlimitedTaskConcurrency and
+            runningTaskCounts.getOrDefault(taskName, 0) >= info.taskConcurrency:
+          result.add(taskName)
 
 proc cancelJob*(jobId: string; queue: string = ""): bool =
   ## Cancel a queued/scheduled job by id.
@@ -246,10 +274,15 @@ proc registerHandler*(name: string, handler: TaskHandler) =
   queeRegistry.handlers[name] = handler
 
 proc registerTask*(
-  name: string; defaultQueue: string; defaultPriority: int; handler: TaskHandler
+  name: string;
+  defaultQueue: string;
+  defaultPriority: int;
+  taskConcurrency: int;
+  handler: TaskHandler;
 ) =
   ## Register a named task with default queue and priority (1 = highest, 10 = lowest).
   validatePriority(defaultPriority)
+  validateTaskConcurrency(taskConcurrency)
   queeRegistry.handlers[name] = handler
   if name notin queeRegistry.taskOrder:
     queeRegistry.taskOrder.add(name)
@@ -257,6 +290,7 @@ proc registerTask*(
     name: name,
     defaultQueue: defaultQueue,
     defaultPriority: defaultPriority,
+    taskConcurrency: taskConcurrency,
   )
 
 proc listTasks*(): seq[TaskInfo] =
@@ -281,6 +315,10 @@ proc printRegisteredTasks*() =
       fgYellow, info.defaultQueue, resetStyle,
       fgCyan, "  priority: ", resetStyle,
       fgYellow, $info.defaultPriority, resetStyle,
+      fgCyan, "  concurrency: ", resetStyle,
+      fgYellow,
+      (if info.taskConcurrency == UnlimitedTaskConcurrency: "unlimited" else: $info.taskConcurrency),
+      resetStyle,
       "\n",
     )
 
@@ -298,3 +336,4 @@ proc resetQueeRegistry*() =
   withCancellationLock:
     cancelledJobs.clear()
     runningJobs.clear()
+    runningTaskCounts.clear()

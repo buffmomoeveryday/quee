@@ -14,35 +14,36 @@ proc nextRecurringPayload(payload: JsonNode): JsonNode =
 proc processOneInQueue(queue: string): bool =
   var payload: JsonNode
   var runningJobId = ""
+  var runningTaskName = ""
 
   withQueeDbLock:
-    let claimed = currentBackend().claimDue(queue)
+    let claimed = currentBackend().claimDue(queue, blockedTaskNames())
     if claimed.id.len > 0:
       payload = claimed.payload
       runningJobId = claimed.id
-      markJobRunning(runningJobId)
+      runningTaskName = payload["taskName"].getStr()
+      markJobRunning(runningJobId, runningTaskName)
 
   if runningJobId.len == 0:
     return false
 
-  let taskName = payload["taskName"].getStr()
   let sched =
     if "schedule" in payload: scheduleFromJson(payload["schedule"])
     else: JobSchedule(kind: skOnce)
 
   try:
     {.cast(gcsafe).}:
-      if hasKey(queeRegistry.handlers, taskName):
-        queeRegistry.handlers[taskName](payload["args"])
+      if hasKey(queeRegistry.handlers, runningTaskName):
+        queeRegistry.handlers[runningTaskName](payload["args"])
       else:
-        queeWarn("No handler registered for: " & taskName)
+        queeWarn("No handler registered for: " & runningTaskName)
 
     if sched.kind != skOnce and not jobCancellationRequested(runningJobId):
       withQueeDbLock:
         currentBackend().requeue(queue, nextRecurringPayload(payload))
   finally:
     if runningJobId.len > 0:
-      unmarkJobRunning(runningJobId)
+      unmarkJobRunning(runningJobId, runningTaskName)
       clearJobCancellation(runningJobId)
 
   true

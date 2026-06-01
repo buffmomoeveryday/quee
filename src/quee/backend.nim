@@ -34,7 +34,9 @@ method enqueue*(backend: QueueBackend; queue: string; payload: JsonNode) {.base,
   ## Persist a new queued job payload.
   raise newException(CatchableError, "backend enqueue is not implemented")
 
-method claimDue*(backend: QueueBackend; queue: string): ClaimedJob {.base, gcsafe.} =
+method claimDue*(
+  backend: QueueBackend; queue: string; blockedTasks: openArray[string]
+): ClaimedJob {.base, gcsafe.} =
   ## Atomically claim and remove one due job from a queue.
   raise newException(CatchableError, "backend claimDue is not implemented")
 
