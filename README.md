@@ -176,6 +176,17 @@ startQuee(50)          # override to 50 ms for this start (also updates stored i
 
 Lower values mean faster pickup of new jobs but more CPU wakeups.
 
+## Skipping missed jobs on deploy
+
+By default, jobs that became due while the app was stopped run when the worker starts again. For deploys where old due work should not catch up, initialize with `skipMissedJobs = true`:
+
+```nim
+initQuee("./mydb", skipMissedJobs = true)
+startQuee()
+```
+
+One-shot jobs that are already due are deleted. Recurring jobs that are already due are advanced to their next run time.
+
 ## Concurrency
 
 How many worker threads run jobs in parallel. Default: **1** (same as before). Similar to Celery's `celery -A app worker --concurrency=4`.
@@ -201,8 +212,17 @@ Calling `startQuee()` twice without `waitForQuee()` raises an error. Multi-proce
 ### Setup
 
 ```nim
-proc initQuee*(path: string; queues = ["default"]; pollIntervalMs = 200; workerConcurrency = 1)
+proc initQuee*(
+  path: string;
+  queues = ["default"];
+  pollIntervalMs = 200;
+  workerConcurrency = 1;
+  skipMissedJobs = false,
+)
   ## Create/open the LMDB directory for job storage.
+
+proc discardMissedJobs*(): int
+  ## Delete due one-shot jobs and advance due recurring jobs without running them.
 
 proc setPollInterval*(ms: int)
   ## Set worker sleep when idle (ms). Minimum 1.
@@ -325,6 +345,7 @@ nim c --threads:on --mm:arc --path:src src/examples/exampleScheduler.nim
 - `src/examples/priorityExample.nim` — default priority, runtime priority override, and priority order.
 - `src/examples/queuesExample.nim` — multiple queues, task queue defaults, runtime queue override, and task listing.
 - `src/examples/workerConfigExample.nim` — poll interval and concurrency configuration.
+- `src/examples/deployUpdateExample.nim` — skip missed jobs on app restart/deploy.
 - `src/examples/concurrencyExample.nim` — background worker concurrency with slow simulated work.
 - `src/examples/exampleScheduler.nim` — long-running scheduler with interval, delayed, daily, weekly, queue, priority, poll interval, and concurrency usage.
 - `src/examples/mummyWebServerExample.nim` — enqueue background work from a Mummy HTTP handler.
@@ -363,6 +384,7 @@ src/
     priorityExample.nim
     queuesExample.nim
     workerConfigExample.nim
+    deployUpdateExample.nim
     concurrencyExample.nim
     exampleScheduler.nim
     mummyWebServerExample.nim

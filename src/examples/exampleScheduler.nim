@@ -33,6 +33,10 @@ task echoEveryWeek():
   queue "slow"
   styledEcho fgCyan, "weekly ", resetStyle, $now(), "\n"
 
+task echoEveryMinuteCron():
+  queue "slow"
+  styledEcho fgWhite, "cron ", resetStyle, $now(), "\n"
+
 task urgentOnce(message: string):
   queue "critical"
   priority 1
@@ -49,10 +53,7 @@ discard echoEveryDay.enqueue().schedule().every().day().at(todaySoon)
 let thisWeekSoon = now() + 45.seconds
 discard echoEveryWeek.enqueue().schedule().every().week().at(thisWeekSoon)
 
-# Cron syntax is supported by the API:
-#   discard someTask.enqueue().schedule().cron().expr("0 9 * * *")
-# Keep it disabled in this live example until cron rescheduling advances to the
-# next matching minute instead of staying due for the current minute.
+discard echoEveryMinuteCron.enqueue().schedule().cron().expr("*/1 * * * *")
 
 startQuee(pollIntervalMs = 50, concurrency = 2)
 queeInfo("Scheduler running with queues default, fast, slow, critical (Ctrl+C to stop)...")

@@ -42,12 +42,14 @@ proc nextDailyRun*(hour, minute, second: int): DateTime =
     candidate = candidate + 1.days
   candidate
 
+proc nextCronRun*(expr: string): float {.gcsafe.}
+
 proc computeInitialRunAt*(schedule: JobSchedule): float =
   case schedule.kind
   of skOnce:
     if schedule.runAt > 0: schedule.runAt else: 0.0
   of skCron:
-    0.0
+    nextCronRun(schedule.cronExpr)
   of skEveryDay:
     nextDailyRun(schedule.atHour, schedule.atMinute, schedule.atSecond)
       .toTime().toUnixFloat()
@@ -62,7 +64,7 @@ proc computeNextRunAt*(schedule: JobSchedule): float =
   of skOnce:
     schedule.runAt
   of skCron:
-    0.0
+    nextCronRun(schedule.cronExpr)
   of skEveryDay:
     nextDailyRun(schedule.atHour, schedule.atMinute, schedule.atSecond)
       .toTime().toUnixFloat()
@@ -90,6 +92,17 @@ proc cronMatches*(expr: string, dt: DateTime): bool =
     cronFieldMatches(parts[2], dt.monthday) and
     cronFieldMatches(parts[3], ord(dt.month)) and
     cronFieldMatches(parts[4], dt.weekday.int)
+
+proc nextCronRun*(expr: string): float {.gcsafe.} =
+  var candidate = now() + 1.minutes
+  candidate = withTime(candidate, candidate.hour, candidate.minute, 0)
+
+  for _ in 0 ..< 527_040:
+    if cronMatches(expr, candidate):
+      return candidate.toTime().toUnixFloat()
+    candidate = candidate + 1.minutes
+
+  epochTime() + 60.0
 
 proc isJobDue*(rawJob: string): bool =
   let payload = parseJson(rawJob)

@@ -39,6 +39,7 @@ task buildExamples, "Build all examples":
   exec "nim c --threads:on --mm:arc --path:src src/examples/priorityExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/queuesExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/workerConfigExample.nim"
+  exec "nim c --threads:on --mm:arc --path:src src/examples/deployUpdateExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/concurrencyExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/exampleScheduler.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/mummyWebServerExample.nim"

@@ -1,6 +1,6 @@
-import std/[locks, os, random, tables, terminal]
+import std/[json, locks, os, random, tables, terminal]
 import limdb
-import ./[types, log, priority]
+import ./[types, log, priority, schedule, jobkey]
 
 var queueDatabases = initTable[string, Database[string, string]]()
 
@@ -76,6 +76,47 @@ proc openQueueDb*(path: string): Database[string, string] {.gcsafe.} =
       queueDatabases[path] = initDatabase(path)
     queueDatabases[path]
 
+proc discardMissedJobsInQueue(path: string): int =
+  let db = openQueueDb(path)
+  var deletes: seq[string] = @[]
+  var updates: seq[JsonNode] = @[]
+
+  db.withTransaction t:
+    for key, val in t.pairs:
+      if not isJobDue(val):
+        continue
+
+      let payload = parseJson(val)
+      let sched =
+        if "schedule" in payload: scheduleFromJson(payload["schedule"])
+        else: JobSchedule(kind: skOnce)
+
+      deletes.add(key)
+      if sched.kind != skOnce:
+        var next = payload
+        next["runAt"] = %computeNextRunAt(sched)
+        updates.add(next)
+
+    for key in deletes:
+      t.del(key)
+    for payload in updates:
+      t[jobStorageKey(payload)] = $payload
+
+  deletes.len
+
+proc discardMissedJobs*(): int =
+  ## Drop jobs that are already due without running them.
+  ##
+  ## One-shot jobs are deleted. Recurring jobs are advanced to their next run
+  ## time so app restarts/deploys do not catch up missed executions.
+  var paths: seq[string] = @[]
+  for _, path in queeRegistry.queuePaths:
+    paths.add(path)
+
+  withQueeDbLock:
+    for path in paths:
+      result += discardMissedJobsInQueue(path)
+
 proc dbPath*(queue: string = ""): string =
   let name =
     if queue.len > 0: queue
@@ -98,8 +139,12 @@ proc initQuee*(
   queues: openArray[string] = ["default"];
   pollIntervalMs: int = DefaultPollIntervalMs;
   workerConcurrency: int = DefaultWorkerConcurrency,
+  skipMissedJobs: bool = false,
 ) =
   ## Open or create the job store. Each queue gets its own subdirectory under `path`.
+  ##
+  ## When ``skipMissedJobs`` is true, jobs already due at startup are skipped:
+  ## one-shot jobs are deleted and recurring jobs are advanced to their next run.
   validatePollInterval(pollIntervalMs)
   validateWorkerConcurrency(workerConcurrency)
   closeQueueDatabases()
@@ -122,6 +167,9 @@ proc initQuee*(
 
   randomize()
   initQueeDbLock()
+
+  if skipMissedJobs:
+    discard discardMissedJobs()
 
 proc registerHandler*(name: string, handler: TaskHandler) =
   ## Register a task handler (usually done by the `task` macro via `registerTask`).

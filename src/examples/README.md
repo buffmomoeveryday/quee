@@ -18,6 +18,7 @@ nimble buildExamples
 - `priorityExample.nim` - task default priority, runtime priority override, and priority execution order.
 - `queuesExample.nim` - multiple queues, task queue defaults, runtime queue override, and registered task listing.
 - `workerConfigExample.nim` - poll interval and worker concurrency configuration without starting a long-running worker.
+- `deployUpdateExample.nim` - skip missed jobs on app restart/deploy with `skipMissedJobs = true`.
 - `concurrencyExample.nim` - background worker concurrency with slow simulated external work.
 - `exampleScheduler.nim` - long-running scheduler with interval, delayed, daily, weekly, queue, priority, poll interval, and concurrency examples.
 - `mummyWebServerExample.nim` - enqueue background jobs from a Mummy HTTP request handler.
