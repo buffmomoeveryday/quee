@@ -43,12 +43,23 @@ method requeue(backend: MemoryBackend; queue: string; payload: JsonNode) {.gcsaf
   {.cast(gcsafe).}:
     backend.jobs.add((queue, payload))
 
-method claimDue(backend: MemoryBackend; queue: string): ClaimedJob {.gcsafe.} =
+proc isBlockedTask(payload: JsonNode; blockedTasks: openArray[string]): bool =
+  if blockedTasks.len == 0 or "taskName" notin payload:
+    return false
+  let taskName = payload["taskName"].getStr()
+  for blocked in blockedTasks:
+    if blocked == taskName:
+      return true
+
+method claimDue(
+  backend: MemoryBackend; queue: string; blockedTasks: openArray[string]
+): ClaimedJob {.gcsafe.} =
   {.cast(gcsafe).}:
     var bestIndex = -1
     var bestPriority = MaxPriority + 1
     for i, item in backend.jobs:
-      if item.queue != queue or not isJobDue($item.payload):
+      if item.queue != queue or not isJobDue($item.payload) or
+          item.payload.isBlockedTask(blockedTasks):
         continue
       let pri = jobPriority(item.payload)
       if bestIndex < 0 or pri < bestPriority:

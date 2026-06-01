@@ -9,9 +9,14 @@ proc calleeName(node: NimNode): string =
   else:
     ""
 
-proc extractTaskMetadata(body: NimNode): (NimNode, NimNode, NimNode) =
-  ## Strip leading ``queue "…"`` and ``priority N`` lines; return literals and remaining body.
-  result = (newLit("default"), newLit(DefaultPriority), body)
+proc extractTaskMetadata(body: NimNode): (NimNode, NimNode, NimNode, NimNode) =
+  ## Strip leading metadata lines; return literals and remaining body.
+  result = (
+    newLit("default"),
+    newLit(DefaultPriority),
+    newLit(UnlimitedTaskConcurrency),
+    body,
+  )
 
   if body.kind != nnkStmtList:
     return
@@ -19,6 +24,7 @@ proc extractTaskMetadata(body: NimNode): (NimNode, NimNode, NimNode) =
   var i = 0
   var queueLit = newLit("default")
   var priorityLit = newLit(DefaultPriority)
+  var concurrencyLit = newLit(UnlimitedTaskConcurrency)
   while i < body.len:
     let stmt = body[i]
     if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 2:
@@ -37,6 +43,14 @@ proc extractTaskMetadata(body: NimNode): (NimNode, NimNode, NimNode) =
         error &"priority must be {MinPriority}..{MaxPriority}, got {p}", stmt[1]
       priorityLit = stmt[1]
       inc i
+    elif name == "concurrency":
+      if stmt[1].kind != nnkIntLit:
+        error "concurrency clause requires an integer literal, e.g. concurrency 2", stmt[1]
+      let limit = stmt[1].intVal
+      if limit < 1 or limit > MaxWorkerConcurrency:
+        error &"concurrency must be 1..{MaxWorkerConcurrency}, got {limit}", stmt[1]
+      concurrencyLit = stmt[1]
+      inc i
     else:
       break
 
@@ -45,7 +59,7 @@ proc extractTaskMetadata(body: NimNode): (NimNode, NimNode, NimNode) =
     rest.add(body[i])
     inc i
 
-  result = (queueLit, priorityLit, rest)
+  result = (queueLit, priorityLit, concurrencyLit, rest)
 
 macro task*(head: untyped, body: untyped): untyped =
   ## Define a background task and a `let` value for enqueueing.
@@ -54,13 +68,15 @@ macro task*(head: untyped, body: untyped): untyped =
   ##
   ##   queue "emails"
   ##   priority 3
+  ##   concurrency 2
   ##
   ## Override at enqueue: ``sendEmail.enqueue(addr, queue = "urgent", priority = 1)``
   let taskNameNode = head[0]
   let taskNameStr = newLit($taskNameNode)
   let typeName = ident($taskNameNode & "Task")
 
-  let (defaultQueueLit, defaultPriorityLit, handlerBody) = extractTaskMetadata(body)
+  let (defaultQueueLit, defaultPriorityLit, taskConcurrencyLit, handlerBody) =
+    extractTaskMetadata(body)
 
   let jsonNodeSym = bindSym"JsonNode"
   let jsonIndexSym = bindSym"[]"
@@ -152,10 +168,18 @@ macro task*(head: untyped, body: untyped): untyped =
     type `typeName`* = object
       defaultQueue*: string
       defaultPriority*: int
+      taskConcurrency*: int
     `handlerProc`
     `enqueueProc`
-    registerTask(`taskNameStr`, `defaultQueueLit`, `defaultPriorityLit`, `handlerSym`)
+    registerTask(
+      `taskNameStr`,
+      `defaultQueueLit`,
+      `defaultPriorityLit`,
+      `taskConcurrencyLit`,
+      `handlerSym`,
+    )
     let `taskNameNode`* = `typeName`(
       defaultQueue: `defaultQueueLit`,
       defaultPriority: `defaultPriorityLit`,
+      taskConcurrency: `taskConcurrencyLit`,
     )

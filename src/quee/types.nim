@@ -7,6 +7,7 @@ type
     name*: string
     defaultQueue*: string
     defaultPriority*: int
+    taskConcurrency*: int
 
   ScheduleKind* = enum
     skOnce

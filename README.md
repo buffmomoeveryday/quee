@@ -67,17 +67,23 @@ task ping():   # no parameters
 
 Arguments are serialized to JSON when enqueued and unmarshalled in the handler.
 
-### Default queue on the task
+### Task metadata
 
-First line in the task body can pin a queue (string literal). Use `queue "name"` (`using` is reserved as a Nim keyword in statement position)::
+Leading lines in the task body can set queue, priority, and per-task concurrency:
 
 ```nim
 initQuee("./mydb", queues = ["default", "emails", "urgent"])
 
 task sendEmail(email: string):
   queue "emails"
+  priority 5
+  concurrency 2
   echo email
 ```
+
+`concurrency 2` means at most two instances of that task handler run at the same time. If omitted, the task has no per-task cap beyond the worker pool size.
+
+### Override queue when enqueueing
 
 ### Override queue when enqueueing
 
@@ -123,8 +129,10 @@ method storagePath(backend: RedisBackend; queue: string): string {.gcsafe.} =
 method enqueue(backend: RedisBackend; queue: string; payload: JsonNode) {.gcsafe.} =
   discard # write payload using jobStorageKey(payload) or an equivalent ordered key
 
-method claimDue(backend: RedisBackend; queue: string): ClaimedJob {.gcsafe.} =
-  discard # atomically pop one due job; return default ClaimedJob when none is due
+method claimDue(
+  backend: RedisBackend; queue: string; blockedTasks: openArray[string]
+): ClaimedJob {.gcsafe.} =
+  discard # atomically pop one due job, skipping blockedTasks; return default when none is due
 
 initQuee("./mydb", backend = RedisBackend())
 ```
@@ -268,7 +276,7 @@ startQuee(concurrency = 4)       # override for this start
 startQuee(pollIntervalMs = 50, concurrency = 4)
 ```
 
-Each thread runs the same loop: atomically claim a due job from the configured backend, run the handler, repeat. With `concurrency > 1`, multiple handlers can run at once when multiple jobs are due.
+Each thread runs the same loop: atomically claim a due job from the configured backend, run the handler, repeat. With worker `concurrency > 1`, multiple handlers can run at once when multiple jobs are due. A task body can add `concurrency N` to cap that specific task below the worker pool size.
 
 **Thread safety:** when `concurrency > 1`, task handlers must not mutate shared global state without synchronization (same expectation as Celery prefork/thread pools).
 
@@ -330,7 +338,9 @@ method setup(backend: QueueBackend; basePath: string; queues: openArray[string])
 method close(backend: QueueBackend)
 method storagePath(backend: QueueBackend; queue: string): string
 method enqueue(backend: QueueBackend; queue: string; payload: JsonNode)
-method claimDue(backend: QueueBackend; queue: string): ClaimedJob
+method claimDue(
+  backend: QueueBackend; queue: string; blockedTasks: openArray[string]
+): ClaimedJob
 method requeue(backend: QueueBackend; queue: string; payload: JsonNode)
 method cancel(backend: QueueBackend; queue: string; jobId: string): bool
 method discardMissed(backend: QueueBackend; queue: string): int
@@ -541,6 +551,7 @@ On `startQuee()`, Quee prints every registered task and its default queue, then 
 [Quee] Registered tasks (2):
   • echoEverySecond  → queue: fast
   • echoEveryDay     → queue: slow
+  # output also includes priority and task concurrency
 [Quee] Background worker started (concurrency 4, poll 200ms, queues: default, fast, slow)
 ```
 
