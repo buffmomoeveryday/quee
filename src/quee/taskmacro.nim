@@ -9,6 +9,20 @@ proc calleeName(node: NimNode): string =
   else:
     ""
 
+proc taskHeadParts(head: NimNode): (NimNode, seq[NimNode]) =
+  if head.kind == nnkInfix and head.len == 3 and calleeName(head[0]) == "*":
+    result[0] = head[1]
+    if head[2].kind == nnkTupleConstr:
+      for child in head[2]:
+        result[1].add(child)
+    else:
+      result[1].add(head[2])
+    return
+
+  result[0] = head[0]
+  for i in 1 ..< head.len:
+    result[1].add(head[i])
+
 proc extractTaskMetadata(body: NimNode): (NimNode, NimNode, NimNode, NimNode) =
   ## Strip leading metadata lines; return literals and remaining body.
   result = (
@@ -71,7 +85,7 @@ macro task*(head: untyped, body: untyped): untyped =
   ##   concurrency 2
   ##
   ## Override at enqueue: ``sendEmail.enqueue(addr, queue = "urgent", priority = 1)``
-  let taskNameNode = head[0]
+  let (taskNameNode, params) = taskHeadParts(head)
   let taskNameStr = newLit($taskNameNode)
   let typeName = ident($taskNameNode & "Task")
 
@@ -92,8 +106,7 @@ macro task*(head: untyped, body: untyped): untyped =
 
   var paramDefs: seq[(NimNode, NimNode)]
 
-  for i in 1 ..< head.len:
-    let p = head[i]
+  for p in params:
     case p.kind
     of nnkExprColonExpr:
       paramDefs.add((p[0], p[1]))
@@ -136,7 +149,7 @@ macro task*(head: untyped, body: untyped): untyped =
 
   let queueParam = ident("queue")
   let priorityParam = ident("priority")
-  let enqueueSym = ident("enqueue")
+  let enqueueSym = postfix(ident("enqueue"), "*")
   var enqueueParams: seq[NimNode] = @[
     jobBuilderSym,
     newIdentDefs(ident("self"), typeName),

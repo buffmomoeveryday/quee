@@ -83,7 +83,26 @@ task sendEmail(email: string):
 
 `concurrency 2` means at most two instances of that task handler run at the same time. If omitted, the task has no per-task cap beyond the worker pool size.
 
-### Override queue when enqueueing
+### Tasks in other modules
+
+Tasks can live outside your main module. Define them normally, import that module from your app, and enqueue the generated task value:
+
+```nim
+# tasks/email_tasks.nim
+import quee
+
+task sendEmail*(email: string):
+  echo email
+
+# main.nim
+import quee
+import tasks/email_tasks
+
+initQuee("./mydb")
+discard sendEmail.enqueue("a@b.com").run()
+```
+
+Importing the task module also runs the generated `registerTask(...)` call, so the worker knows about the handler.
 
 ### Override queue when enqueueing
 

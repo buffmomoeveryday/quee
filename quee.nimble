@@ -22,6 +22,7 @@ task test, "Run the test suite":
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_queue.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_queues.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_backends.nim"
+  exec "nim c -r --threads:on --mm:arc --path:src tests/test_imported_tasks.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_priority.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_cancel.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_task_concurrency.nim"
