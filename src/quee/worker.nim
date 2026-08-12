@@ -24,7 +24,7 @@ proc processOneInQueue(queue: string): bool =
       runningJobId = claimed.id
       runningLeaseId = claimed.leaseId
       runningTaskName = payload["taskName"].getStr()
-      markJobRunning(runningJobId, runningTaskName)
+      markJobRunning(runningJobId, runningTaskName, queue, runningLeaseId)
 
   if runningJobId.len == 0:
     return false
@@ -48,10 +48,21 @@ proc processOneInQueue(queue: string): bool =
 
     withQueeDbLock:
       currentBackend().complete(queue, runningJobId, runningLeaseId, nextPayload)
-  except CatchableError:
-    queeWarn("Job failed and was released for retry: " & runningTaskName & " (" & runningJobId & ")")
+  except CatchableError as e:
+    let msg = e.msg
+    queeWarn(
+      "Job failed: " & runningTaskName & " (" & runningJobId & "): " & msg,
+    )
     withQueeDbLock:
-      currentBackend().release(queue, runningJobId, runningLeaseId)
+      currentBackend().fail(
+        queue,
+        runningJobId,
+        runningLeaseId,
+        maxAttempts(),
+        retryDelay(),
+        retryBackoff(),
+        msg,
+      )
   finally:
     if runningJobId.len > 0:
       unmarkJobRunning(runningJobId, runningTaskName)

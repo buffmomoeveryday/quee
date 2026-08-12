@@ -57,3 +57,6 @@ type
     pollIntervalMs*: int
     workerConcurrency*: int
     jobLeaseTimeoutMs*: int
+    maxAttempts*: int
+    retryDelayMs*: int
+    retryBackoff*: float

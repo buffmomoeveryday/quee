@@ -57,6 +57,26 @@ method release*(backend: QueueBackend; queue: string; jobId: string; leaseId: st
   ## Release a leased job after handler failure so it can be retried.
   raise newException(CatchableError, "backend release is not implemented")
 
+method fail*(
+  backend: QueueBackend;
+  queue: string;
+  jobId: string;
+  leaseId: string;
+  maxAttempts: int;
+  retryDelayMs: int;
+  retryBackoff: float;
+  errorMessage: string;
+) {.base, gcsafe.} =
+  ## Record a leased job failure. Queue it for retry using the retry policy
+  ## while attempts remain, otherwise move it to a terminal failed state.
+  raise newException(CatchableError, "backend fail is not implemented")
+
+method renewLease*(
+  backend: QueueBackend; queue: string; jobId: string; leaseId: string; leaseTimeoutMs: int
+): bool {.base, gcsafe.} =
+  ## Extend a leased job owned by the current lease token.
+  false
+
 method cancel*(backend: QueueBackend; queue: string; jobId: string): bool {.base, gcsafe.} =
   ## Remove a queued job by id. Return false if not found or unsupported.
   false

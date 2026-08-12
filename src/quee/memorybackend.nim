@@ -1,4 +1,4 @@
-import std/[json, os, times]
+import std/[json, math, os, random, times]
 import ./[backend, priority, schedule, types]
 
 type
@@ -9,6 +9,7 @@ type
     leasedUntil: int64
     leaseId: string
     attempts: int
+    lastError: string
 
   MemoryBackend* = ref object of QueueBackend
     basePath: string
@@ -41,8 +42,15 @@ method enqueue*(backend: MemoryBackend; queue: string; payload: JsonNode) {.gcsa
 proc nowMillis(): int64 =
   int64(epochTime() * 1000.0)
 
-proc newLeaseId(jobId: string; leasedUntil: int64): string =
-  jobId & "|" & $leasedUntil
+proc newLeaseId(): string =
+  $rand(high(int)) & "-" & $rand(high(int)) & "-" & $rand(high(int))
+
+proc nextRetryRunAt(attempts, retryDelayMs: int; retryBackoff: float): float =
+  if retryDelayMs <= 0:
+    epochTime()
+  else:
+    let multiplier = pow(retryBackoff, max(attempts - 1, 0).float)
+    epochTime() + (retryDelayMs.float * multiplier / 1000.0)
 
 method claimDue*(
   backend: MemoryBackend; queue: string; blockedTasks: openArray[string]; leaseTimeoutMs: int
@@ -65,8 +73,7 @@ method claimDue*(
     if bestIndex >= 0:
       backend.jobs[bestIndex].state = "running"
       backend.jobs[bestIndex].leasedUntil = nowMs + leaseTimeoutMs.int64
-      backend.jobs[bestIndex].leaseId =
-        newLeaseId(backend.jobs[bestIndex].payload["id"].getStr(), backend.jobs[bestIndex].leasedUntil)
+      backend.jobs[bestIndex].leaseId = newLeaseId()
       inc backend.jobs[bestIndex].attempts
       let payload = backend.jobs[bestIndex].payload
       result = ClaimedJob(
@@ -98,6 +105,43 @@ method release*(backend: MemoryBackend; queue: string; jobId: string; leaseId: s
         job.leasedUntil = 0
         job.leaseId = ""
         break
+
+method fail*(
+  backend: MemoryBackend;
+  queue: string;
+  jobId: string;
+  leaseId: string;
+  maxAttempts: int;
+  retryDelayMs: int;
+  retryBackoff: float;
+  errorMessage: string;
+) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    for job in backend.jobs.mitems:
+      if job.queue == queue and job.state == "running" and job.leaseId == leaseId and
+          job.payload["id"].getStr() == jobId:
+        job.lastError = errorMessage
+        if job.attempts >= maxAttempts:
+          job.state = "failed"
+          job.leasedUntil = 0
+          job.leaseId = ""
+        else:
+          job.payload["runAt"] = %nextRetryRunAt(job.attempts, retryDelayMs, retryBackoff)
+          job.state = "queued"
+          job.leasedUntil = 0
+          job.leaseId = ""
+        break
+
+method renewLease*(
+  backend: MemoryBackend; queue: string; jobId: string; leaseId: string; leaseTimeoutMs: int
+): bool {.gcsafe.} =
+  {.cast(gcsafe).}:
+    let leasedUntil = nowMillis() + leaseTimeoutMs.int64
+    for job in backend.jobs.mitems:
+      if job.queue == queue and job.state == "running" and job.leaseId == leaseId and
+          job.payload["id"].getStr() == jobId:
+        job.leasedUntil = leasedUntil
+        return true
 
 method cancel*(backend: MemoryBackend; queue: string; jobId: string): bool {.gcsafe.} =
   {.cast(gcsafe).}:

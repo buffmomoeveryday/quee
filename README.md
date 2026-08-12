@@ -7,7 +7,7 @@ A lightweight background job queue for Nim. Define tasks with a macro, enqueue w
 - **Task macro** — declare handlers with typed parameters
 - **Fluent scheduling** — run now, delay, intervals, cron, daily/weekly
 - **Durable storage** — jobs survive process restarts with the built-in SQLite backend
-- **At-least-once delivery** — claimed jobs use leases and are retried after handler failure or lease expiry
+- **At-least-once delivery** — claimed jobs use leases, bounded retries, backoff, and failed state
 - **In-memory storage** — run without disk persistence for tests and ephemeral workloads
 - **Pluggable backends** — provide a `QueueBackend` for Redis, Postgres, or another store
 - **Background workers** — configurable thread pool (`concurrency`, like Celery `-c`) and poll interval
@@ -145,20 +145,40 @@ PRAGMA temp_store = MEMORY;
 
 ### Delivery guarantee
 
-With the SQLite backend, queued jobs are persisted until a worker leases them. A successful handler completes the lease and deletes the one-shot job. A failed handler releases the job for retry. If a process crashes after leasing a job but before completion, another worker can claim it after the lease timeout.
+With the SQLite backend, queued jobs are persisted until a worker leases them. A successful handler completes the lease and deletes the one-shot job. A failed handler records the exception message and retries the job after the configured delay/backoff. If attempts are exhausted, the job moves to `failed`. If a process crashes after leasing a job but before completion, another worker can claim it after the lease timeout.
 
 This is an **at-least-once** guarantee: a job should not be lost after it is durably enqueued, but it may run more than once after a crash, timeout, or retry. Task handlers should therefore be idempotent when they perform external side effects.
 
-The default lease timeout is 30 seconds:
+The default lease timeout is 30 seconds. Set it above the longest expected handler runtime, or call `renewLease()` inside long-running handlers:
 
 ```nim
-initQuee("./mydb", jobLeaseTimeoutMs = 30_000)
+initQuee("./mydb", jobLeaseTimeoutMs = 120_000)
 setJobLeaseTimeout(60_000)
+
+task longImport():
+  for chunk in chunks:
+    process(chunk)
+    discard renewLease()
+```
+
+The default retry policy is 3 attempts, 1 second initial delay, and 2x exponential backoff:
+
+```nim
+initQuee(
+  "./mydb",
+  maxAttempts = 5,
+  retryDelayMs = 2_000,
+  retryBackoff = 2.0,
+)
+
+setMaxAttempts(5)
+setRetryDelay(2_000)
+setRetryBackoff(2.0)
 ```
 
 The in-memory backend follows the same lease/retry lifecycle while the process is alive, but it is not durable across process exits.
 
-Custom backends subclass `QueueBackend` and pass an instance to `initQuee`. `claimDue` must atomically lease one due job so concurrent workers cannot run the same payload at the same time. Leased jobs must become claimable again after `leaseTimeoutMs` unless `complete` is called:
+Custom backends subclass `QueueBackend` and pass an instance to `initQuee`. `claimDue` must atomically lease one due job so concurrent workers cannot run the same payload at the same time. Leased jobs must become claimable again after `leaseTimeoutMs` unless `complete` or `renewLease` is called:
 
 ```nim
 import std/json
@@ -188,6 +208,23 @@ method complete(
 
 method release(backend: RedisBackend; queue: string; jobId: string; leaseId: string) {.gcsafe.} =
   discard # make a failed leased job immediately claimable again
+
+method fail(
+  backend: RedisBackend;
+  queue: string;
+  jobId: string;
+  leaseId: string;
+  maxAttempts: int;
+  retryDelayMs: int;
+  retryBackoff: float;
+  errorMessage: string;
+) {.gcsafe.} =
+  discard # retry with backoff while attempts remain; otherwise mark failed
+
+method renewLease(
+  backend: RedisBackend; queue: string; jobId: string; leaseId: string; leaseTimeoutMs: int
+): bool {.gcsafe.} =
+  discard # extend the lease only if leaseId still owns the job
 
 initQuee("./mydb", backend = RedisBackend())
 ```
@@ -348,6 +385,9 @@ proc initQuee*(
   pollIntervalMs = 200;
   workerConcurrency = 1;
   jobLeaseTimeoutMs = 30_000;
+  maxAttempts = 3;
+  retryDelayMs = 1_000;
+  retryBackoff = 2.0;
   skipMissedJobs = false;
   backendKind = bkSqlite;
   backend: QueueBackend = nil
@@ -363,6 +403,10 @@ proc cancelJob*(jobId: string; queue = ""): bool
 proc cancellationRequested*(): bool
   ## True inside a running task after cancellation has been requested.
 
+proc renewLease*(): bool
+  ## Extend the current running job's lease. Returns false outside a running job
+  ## or when this handler no longer owns the active lease.
+
 proc setPollInterval*(ms: int)
   ## Set worker sleep when idle (ms). Minimum 1.
 
@@ -374,6 +418,21 @@ proc setJobLeaseTimeout*(ms: int)
 
 proc jobLeaseTimeout*(): int
   ## Current job lease timeout in milliseconds.
+
+proc setMaxAttempts*(n: int)
+  ## Set maximum handler attempts before failed state. Minimum 1.
+
+proc maxAttempts*(): int
+
+proc setRetryDelay*(ms: int)
+  ## Set initial retry delay in milliseconds. Minimum 0.
+
+proc retryDelay*(): int
+
+proc setRetryBackoff*(factor: float)
+  ## Set exponential retry backoff factor. Minimum 1.0.
+
+proc retryBackoff*(): float
 
 proc setWorkerConcurrency*(n: int)
   ## Worker threads for next ``startQuee`` (1..64).
@@ -407,6 +466,19 @@ method claimDue(
 method requeue(backend: QueueBackend; queue: string; payload: JsonNode)
 method complete(backend: QueueBackend; queue: string; jobId: string; leaseId: string; nextPayload: JsonNode = nil)
 method release(backend: QueueBackend; queue: string; jobId: string; leaseId: string)
+method fail(
+  backend: QueueBackend;
+  queue: string;
+  jobId: string;
+  leaseId: string;
+  maxAttempts: int;
+  retryDelayMs: int;
+  retryBackoff: float;
+  errorMessage: string;
+)
+method renewLease(
+  backend: QueueBackend; queue: string; jobId: string; leaseId: string; leaseTimeoutMs: int
+): bool
 method cancel(backend: QueueBackend; queue: string; jobId: string): bool
 method discardMissed(backend: QueueBackend; queue: string): int
 

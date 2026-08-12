@@ -23,6 +23,10 @@ task backendFlaky():
   if backendHits.len == 1:
     raise newException(ValueError, "transient failure")
 
+task backendAlwaysFail():
+  backendHits.add("fail")
+  raise newException(ValueError, "permanent failure")
+
 suite "storage backends":
   var dbPath: string
 
@@ -71,7 +75,7 @@ suite "storage backends":
     check backendHits == @["recurring"]
 
   test "sqlite backend retries jobs after handler failure":
-    initQuee(dbPath, backendKind = bkSqlite)
+    initQuee(dbPath, backendKind = bkSqlite, retryDelayMs = 0)
     discard backendFlaky.enqueue().run()
 
     check processOne()
@@ -79,6 +83,20 @@ suite "storage backends":
     check processOne()
     check backendHits == @["attempt", "attempt"]
     check not processOne()
+
+  test "sqlite backend moves exhausted retries to failed state":
+    initQuee(dbPath, backendKind = bkSqlite, maxAttempts = 2, retryDelayMs = 0)
+    discard backendAlwaysFail.enqueue().run()
+
+    check processOne()
+    check processOne()
+    check not processOne()
+    check backendHits == @["fail", "fail"]
+
+    let db = open(dbPath / "quee.sqlite3", "", "", "")
+    defer: db.close()
+    check db.getValue(sql"SELECT state FROM jobs LIMIT 1") == "failed"
+    check db.getValue(sql"SELECT last_error FROM jobs LIMIT 1") == "permanent failure"
 
   test "sqlite backend retries expired leased jobs":
     initQuee(dbPath, backendKind = bkSqlite, jobLeaseTimeoutMs = 20)
@@ -88,9 +106,28 @@ suite "storage backends":
       claimed = currentBackend().claimDue("default", @[], jobLeaseTimeout())
 
     check claimed.id == job.id
+    check claimed.leaseId.len > 0
+    check job.id notin claimed.leaseId
     check not processOne()
     sleep(40)
     check processOne()
+    check backendHits == @["low"]
+
+  test "sqlite backend renews active leases":
+    initQuee(dbPath, backendKind = bkSqlite, jobLeaseTimeoutMs = 50)
+    let job = backendLow.enqueue().run()
+    var claimed: ClaimedJob
+    withQueeDbLock:
+      claimed = currentBackend().claimDue("default", @[], jobLeaseTimeout())
+
+    sleep(30)
+    withQueeDbLock:
+      check currentBackend().renewLease("default", claimed.id, claimed.leaseId, jobLeaseTimeout())
+    sleep(30)
+    check not processOne()
+    sleep(60)
+    check processOne()
+    check claimed.id == job.id
     check backendHits == @["low"]
 
   test "sqlite backend ignores stale lease completion":
@@ -143,7 +180,7 @@ suite "storage backends":
     check backendHits == @["recurring"]
 
   test "memory backend retries jobs after handler failure":
-    initQuee(dbPath, backendKind = bkMemory)
+    initQuee(dbPath, backendKind = bkMemory, retryDelayMs = 0)
     discard backendFlaky.enqueue().run()
 
     check processOne()
@@ -151,6 +188,15 @@ suite "storage backends":
     check processOne()
     check backendHits == @["attempt", "attempt"]
     check not processOne()
+
+  test "memory backend stops exhausted retries":
+    initQuee(dbPath, backendKind = bkMemory, maxAttempts = 2, retryDelayMs = 0)
+    discard backendAlwaysFail.enqueue().run()
+
+    check processOne()
+    check processOne()
+    check not processOne()
+    check backendHits == @["fail", "fail"]
 
   test "memory backend retries expired leased jobs":
     initQuee(dbPath, backendKind = bkMemory, jobLeaseTimeoutMs = 20)
@@ -160,9 +206,28 @@ suite "storage backends":
       claimed = currentBackend().claimDue("default", @[], jobLeaseTimeout())
 
     check claimed.id == job.id
+    check claimed.leaseId.len > 0
+    check job.id notin claimed.leaseId
     check not processOne()
     sleep(40)
     check processOne()
+    check backendHits == @["low"]
+
+  test "memory backend renews active leases":
+    initQuee(dbPath, backendKind = bkMemory, jobLeaseTimeoutMs = 50)
+    let job = backendLow.enqueue().run()
+    var claimed: ClaimedJob
+    withQueeDbLock:
+      claimed = currentBackend().claimDue("default", @[], jobLeaseTimeout())
+
+    sleep(30)
+    withQueeDbLock:
+      check currentBackend().renewLease("default", claimed.id, claimed.leaseId, jobLeaseTimeout())
+    sleep(30)
+    check not processOne()
+    sleep(60)
+    check processOne()
+    check claimed.id == job.id
     check backendHits == @["low"]
 
   test "memory backend ignores stale lease completion":

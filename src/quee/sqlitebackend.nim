@@ -1,4 +1,4 @@
-import std/[json, os, times]
+import std/[json, math, os, random, strutils, times]
 import db_connector/db_sqlite
 import ./[backend, jobkey, priority, schedule, types]
 
@@ -26,8 +26,15 @@ proc applyPerformancePragmas(db: DbConn) =
 proc nowMillis(): int64 =
   int64(epochTime() * 1000.0)
 
-proc newLeaseId(jobId: string; leasedUntil: int64): string =
-  jobId & "|" & $leasedUntil
+proc newLeaseId(): string =
+  $rand(high(int)) & "-" & $rand(high(int)) & "-" & $rand(high(int))
+
+proc nextRetryRunAt(attempts, retryDelayMs: int; retryBackoff: float): float =
+  if retryDelayMs <= 0:
+    epochTime()
+  else:
+    let multiplier = pow(retryBackoff, max(attempts - 1, 0).float)
+    epochTime() + (retryDelayMs.float * multiplier / 1000.0)
 
 proc jobIdFromPayload(raw: string): string =
   let payload = parseJson(raw)
@@ -59,6 +66,7 @@ method setup*(backend: SqliteBackend; basePath: string; queues: openArray[string
         leased_until INTEGER NOT NULL DEFAULT 0,
         lease_id TEXT NOT NULL DEFAULT '',
         attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (queue, storage_key)
       )
     """)
@@ -76,6 +84,10 @@ method setup*(backend: SqliteBackend; basePath: string; queues: openArray[string
       discard
     try:
       backend.db.execSql(sql"ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+    except DbError:
+      discard
+    try:
+      backend.db.execSql(sql"ALTER TABLE jobs ADD COLUMN last_error TEXT NOT NULL DEFAULT ''")
     except DbError:
       discard
     backend.db.execSql(sql"CREATE INDEX IF NOT EXISTS idx_jobs_queue_key ON jobs(queue, storage_key)")
@@ -150,7 +162,7 @@ method claimDue*(
           bestPri = pri
 
       if rawJob.len > 0:
-        let leaseId = newLeaseId(jobIdFromPayload(rawJob), leasedUntil)
+        let leaseId = newLeaseId()
         db.execSql(
           sql"""
             UPDATE jobs
@@ -167,7 +179,13 @@ method claimDue*(
       if rawJob.len > 0:
         result.payload = parseJson(rawJob)
         result.id = result.payload["id"].getStr()
-        result.leaseId = newLeaseId(result.id, leasedUntil)
+        for row in db.fastRows(
+          sql"SELECT lease_id FROM jobs WHERE queue = ? AND storage_key = ?",
+          queue,
+          storageKey,
+        ):
+          result.leaseId = row[0]
+          break
     except CatchableError:
       db.execSql(sql"ROLLBACK")
       raise
@@ -237,6 +255,99 @@ method release*(backend: SqliteBackend; queue: string; jobId: string; leaseId: s
           queue,
           storageKey,
         )
+      db.execSql(sql"COMMIT")
+    except CatchableError:
+      db.execSql(sql"ROLLBACK")
+      raise
+
+method fail*(
+  backend: SqliteBackend;
+  queue: string;
+  jobId: string;
+  leaseId: string;
+  maxAttempts: int;
+  retryDelayMs: int;
+  retryBackoff: float;
+  errorMessage: string;
+) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    let db = backend.requireDb()
+    db.execSql(sql"BEGIN IMMEDIATE")
+    try:
+      var storageKey = ""
+      var rawPayload = ""
+      var attempts = 0
+      for row in db.fastRows(
+        sql"""
+          SELECT storage_key, payload, lease_id, attempts
+          FROM jobs WHERE queue = ? AND state = 'running'
+        """,
+        queue,
+      ):
+        if row[2] == leaseId and jobIdFromPayload(row[1]) == jobId:
+          storageKey = row[0]
+          rawPayload = row[1]
+          attempts = parseInt(row[3])
+          break
+
+      if storageKey.len > 0:
+        if attempts >= maxAttempts:
+          db.execSql(
+            sql"""
+              UPDATE jobs
+              SET state = 'failed', leased_until = 0, lease_id = '', last_error = ?
+              WHERE queue = ? AND storage_key = ?
+            """,
+            errorMessage,
+            queue,
+            storageKey,
+          )
+        else:
+          var payload = parseJson(rawPayload)
+          payload["runAt"] = %nextRetryRunAt(attempts, retryDelayMs, retryBackoff)
+          db.execSql(sql"DELETE FROM jobs WHERE queue = ? AND storage_key = ?", queue, storageKey)
+          db.execSql(
+            sql"""
+              INSERT OR REPLACE INTO jobs(
+                queue, storage_key, payload, state, leased_until, lease_id, attempts, last_error
+              )
+              VALUES (?, ?, ?, 'queued', 0, '', ?, ?)
+            """,
+            queue,
+            jobStorageKey(payload),
+            $payload,
+            $attempts,
+            errorMessage,
+          )
+      db.execSql(sql"COMMIT")
+    except CatchableError:
+      db.execSql(sql"ROLLBACK")
+      raise
+
+method renewLease*(
+  backend: SqliteBackend; queue: string; jobId: string; leaseId: string; leaseTimeoutMs: int
+): bool {.gcsafe.} =
+  {.cast(gcsafe).}:
+    let db = backend.requireDb()
+    let leasedUntil = nowMillis() + leaseTimeoutMs.int64
+    db.execSql(sql"BEGIN IMMEDIATE")
+    try:
+      var storageKey = ""
+      for row in db.fastRows(
+        sql"SELECT storage_key, payload, lease_id FROM jobs WHERE queue = ? AND state = 'running'",
+        queue,
+      ):
+        if row[2] == leaseId and jobIdFromPayload(row[1]) == jobId:
+          storageKey = row[0]
+          break
+      if storageKey.len > 0:
+        db.execSql(
+          sql"UPDATE jobs SET leased_until = ? WHERE queue = ? AND storage_key = ?",
+          $leasedUntil,
+          queue,
+          storageKey,
+        )
+        result = true
       db.execSql(sql"COMMIT")
     except CatchableError:
       db.execSql(sql"ROLLBACK")

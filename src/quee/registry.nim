@@ -8,6 +8,9 @@ const
   DefaultWorkerConcurrency* = 1
   MaxWorkerConcurrency* = 64
   DefaultJobLeaseTimeoutMs* = 30_000
+  DefaultMaxAttempts* = 3
+  DefaultRetryDelayMs* = 1_000
+  DefaultRetryBackoff* = 2.0
 
 var queeDbLock: Lock
 var queeDbLockInitialized = false
@@ -17,6 +20,8 @@ var cancelledJobs = initTable[string, bool]()
 var runningJobs = initTable[string, bool]()
 var runningTaskCounts = initTable[string, int]()
 var currentJobId {.threadvar.}: string
+var currentQueue {.threadvar.}: string
+var currentLeaseId {.threadvar.}: string
 
 proc initQueeDbLock*() =
   if not queeDbLockInitialized:
@@ -53,6 +58,9 @@ var queeRegistry* {.global.}: QueeRegistry = QueeRegistry(
     pollIntervalMs: DefaultPollIntervalMs,
     workerConcurrency: DefaultWorkerConcurrency,
     jobLeaseTimeoutMs: DefaultJobLeaseTimeoutMs,
+    maxAttempts: DefaultMaxAttempts,
+    retryDelayMs: DefaultRetryDelayMs,
+    retryBackoff: DefaultRetryBackoff,
 )
 
 proc validateWorkerConcurrency*(n: int) =
@@ -88,6 +96,18 @@ proc validateJobLeaseTimeout*(ms: int) =
   if ms < 1:
     raise newException(ValueError, "job lease timeout must be at least 1 ms, got " & $ms)
 
+proc validateMaxAttempts*(n: int) =
+  if n < 1:
+    raise newException(ValueError, "max attempts must be at least 1, got " & $n)
+
+proc validateRetryDelay*(ms: int) =
+  if ms < 0:
+    raise newException(ValueError, "retry delay must be >= 0 ms, got " & $ms)
+
+proc validateRetryBackoff*(factor: float) =
+  if factor < 1.0:
+    raise newException(ValueError, "retry backoff must be >= 1.0, got " & $factor)
+
 proc setPollInterval*(ms: int) =
   ## Set how long the worker sleeps when no job is due (milliseconds). Safe before or after ``startQuee``.
   validatePollInterval(ms)
@@ -108,6 +128,33 @@ proc jobLeaseTimeout*(): int {.gcsafe.} =
   {.cast(gcsafe).}:
     queeRegistry.jobLeaseTimeoutMs
 
+proc setMaxAttempts*(n: int) =
+  ## Set maximum handler attempts before a job moves to failed state.
+  validateMaxAttempts(n)
+  queeRegistry.maxAttempts = n
+
+proc maxAttempts*(): int {.gcsafe.} =
+  {.cast(gcsafe).}:
+    queeRegistry.maxAttempts
+
+proc setRetryDelay*(ms: int) =
+  ## Set initial retry delay in milliseconds. Zero retries immediately.
+  validateRetryDelay(ms)
+  queeRegistry.retryDelayMs = ms
+
+proc retryDelay*(): int {.gcsafe.} =
+  {.cast(gcsafe).}:
+    queeRegistry.retryDelayMs
+
+proc setRetryBackoff*(factor: float) =
+  ## Set exponential retry backoff factor. Minimum 1.0.
+  validateRetryBackoff(factor)
+  queeRegistry.retryBackoff = factor
+
+proc retryBackoff*(): float {.gcsafe.} =
+  {.cast(gcsafe).}:
+    queeRegistry.retryBackoff
+
 proc newBackend*(kind: BackendKind): QueueBackend =
   case kind
   of bkSqlite:
@@ -126,9 +173,11 @@ proc closeQueueDatabases*() =
   if activeBackend != nil:
     activeBackend.close()
 
-proc markJobRunning*(jobId: string; taskName: string) {.gcsafe.} =
+proc markJobRunning*(jobId: string; taskName: string; queue: string; leaseId: string) {.gcsafe.} =
   {.cast(gcsafe).}:
     currentJobId = jobId
+    currentQueue = queue
+    currentLeaseId = leaseId
     withCancellationLock:
       runningJobs[jobId] = true
       if taskName.len > 0:
@@ -137,6 +186,8 @@ proc markJobRunning*(jobId: string; taskName: string) {.gcsafe.} =
 proc unmarkJobRunning*(jobId: string; taskName: string) {.gcsafe.} =
   {.cast(gcsafe).}:
     currentJobId = ""
+    currentQueue = ""
+    currentLeaseId = ""
     withCancellationLock:
       runningJobs.del(jobId)
       if taskName.len > 0 and taskName in runningTaskCounts:
@@ -148,6 +199,18 @@ proc unmarkJobRunning*(jobId: string; taskName: string) {.gcsafe.} =
 
 proc currentJob*(): string {.gcsafe.} =
   currentJobId
+
+proc renewLease*(): bool {.gcsafe.} =
+  ## Extend the current job's lease by ``jobLeaseTimeout``. Intended for long
+  ## task handlers; returns false when called outside a running job or after a
+  ## newer retry lease has taken ownership.
+  let jobId = currentJobId
+  let queue = currentQueue
+  let leaseId = currentLeaseId
+  if jobId.len == 0 or queue.len == 0 or leaseId.len == 0:
+    return false
+  withQueeDbLock:
+    result = currentBackend().renewLease(queue, jobId, leaseId, jobLeaseTimeout())
 
 proc requestJobCancellation(jobId: string) =
   withCancellationLock:
@@ -249,6 +312,9 @@ proc initQuee*(
   pollIntervalMs: int = DefaultPollIntervalMs;
   workerConcurrency: int = DefaultWorkerConcurrency,
   jobLeaseTimeoutMs: int = DefaultJobLeaseTimeoutMs,
+  maxAttempts: int = DefaultMaxAttempts,
+  retryDelayMs: int = DefaultRetryDelayMs,
+  retryBackoff: float = DefaultRetryBackoff,
   skipMissedJobs: bool = false,
   backendKind: BackendKind = bkSqlite,
   backend: QueueBackend = nil,
@@ -260,6 +326,9 @@ proc initQuee*(
   validatePollInterval(pollIntervalMs)
   validateWorkerConcurrency(workerConcurrency)
   validateJobLeaseTimeout(jobLeaseTimeoutMs)
+  validateMaxAttempts(maxAttempts)
+  validateRetryDelay(retryDelayMs)
+  validateRetryBackoff(retryBackoff)
   if "default" notin queues:
     raise newException(ValueError, "queues must include \"default\"")
 
@@ -276,6 +345,9 @@ proc initQuee*(
   queeRegistry.pollIntervalMs = pollIntervalMs
   queeRegistry.workerConcurrency = workerConcurrency
   queeRegistry.jobLeaseTimeoutMs = jobLeaseTimeoutMs
+  queeRegistry.maxAttempts = maxAttempts
+  queeRegistry.retryDelayMs = retryDelayMs
+  queeRegistry.retryBackoff = retryBackoff
 
   queeRegistry.defaultQueue = "default"
 
@@ -354,6 +426,9 @@ proc resetQueeRegistry*() =
   queeRegistry.pollIntervalMs = DefaultPollIntervalMs
   queeRegistry.workerConcurrency = DefaultWorkerConcurrency
   queeRegistry.jobLeaseTimeoutMs = DefaultJobLeaseTimeoutMs
+  queeRegistry.maxAttempts = DefaultMaxAttempts
+  queeRegistry.retryDelayMs = DefaultRetryDelayMs
+  queeRegistry.retryBackoff = DefaultRetryBackoff
   withCancellationLock:
     cancelledJobs.clear()
     runningJobs.clear()
