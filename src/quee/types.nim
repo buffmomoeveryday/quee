@@ -56,3 +56,4 @@ type
     defaultQueue*: string
     pollIntervalMs*: int
     workerConcurrency*: int
+    jobLeaseTimeoutMs*: int

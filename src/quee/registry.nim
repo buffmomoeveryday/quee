@@ -7,6 +7,7 @@ const
   DefaultPollIntervalMs* = 200
   DefaultWorkerConcurrency* = 1
   MaxWorkerConcurrency* = 64
+  DefaultJobLeaseTimeoutMs* = 30_000
 
 var queeDbLock: Lock
 var queeDbLockInitialized = false
@@ -48,9 +49,10 @@ var queeRegistry* {.global.}: QueeRegistry = QueeRegistry(
   taskOrder: @[],
   queues: @[],
   queuePaths: initTable[string, string](),
-  defaultQueue: "default",
-  pollIntervalMs: DefaultPollIntervalMs,
-  workerConcurrency: DefaultWorkerConcurrency,
+    defaultQueue: "default",
+    pollIntervalMs: DefaultPollIntervalMs,
+    workerConcurrency: DefaultWorkerConcurrency,
+    jobLeaseTimeoutMs: DefaultJobLeaseTimeoutMs,
 )
 
 proc validateWorkerConcurrency*(n: int) =
@@ -82,6 +84,10 @@ proc validatePollInterval*(ms: int) =
   if ms < 1:
     raise newException(ValueError, "poll interval must be at least 1 ms, got " & $ms)
 
+proc validateJobLeaseTimeout*(ms: int) =
+  if ms < 1:
+    raise newException(ValueError, "job lease timeout must be at least 1 ms, got " & $ms)
+
 proc setPollInterval*(ms: int) =
   ## Set how long the worker sleeps when no job is due (milliseconds). Safe before or after ``startQuee``.
   validatePollInterval(ms)
@@ -90,6 +96,17 @@ proc setPollInterval*(ms: int) =
 proc pollInterval*(): int =
   ## Current worker poll interval in milliseconds.
   queeRegistry.pollIntervalMs
+
+proc setJobLeaseTimeout*(ms: int) =
+  ## Set how long a claimed job is reserved for a worker before another worker
+  ## may retry it after a crash or hung handler.
+  validateJobLeaseTimeout(ms)
+  queeRegistry.jobLeaseTimeoutMs = ms
+
+proc jobLeaseTimeout*(): int {.gcsafe.} =
+  ## Current job lease timeout in milliseconds.
+  {.cast(gcsafe).}:
+    queeRegistry.jobLeaseTimeoutMs
 
 proc newBackend*(kind: BackendKind): QueueBackend =
   case kind
@@ -231,6 +248,7 @@ proc initQuee*(
   queues: openArray[string] = ["default"];
   pollIntervalMs: int = DefaultPollIntervalMs;
   workerConcurrency: int = DefaultWorkerConcurrency,
+  jobLeaseTimeoutMs: int = DefaultJobLeaseTimeoutMs,
   skipMissedJobs: bool = false,
   backendKind: BackendKind = bkSqlite,
   backend: QueueBackend = nil,
@@ -241,6 +259,7 @@ proc initQuee*(
   ## one-shot jobs are deleted and recurring jobs are advanced to their next run.
   validatePollInterval(pollIntervalMs)
   validateWorkerConcurrency(workerConcurrency)
+  validateJobLeaseTimeout(jobLeaseTimeoutMs)
   if "default" notin queues:
     raise newException(ValueError, "queues must include \"default\"")
 
@@ -256,6 +275,7 @@ proc initQuee*(
   queeRegistry.queuePaths.clear()
   queeRegistry.pollIntervalMs = pollIntervalMs
   queeRegistry.workerConcurrency = workerConcurrency
+  queeRegistry.jobLeaseTimeoutMs = jobLeaseTimeoutMs
 
   queeRegistry.defaultQueue = "default"
 
@@ -333,6 +353,7 @@ proc resetQueeRegistry*() =
   queeRegistry.basePath = ""
   queeRegistry.pollIntervalMs = DefaultPollIntervalMs
   queeRegistry.workerConcurrency = DefaultWorkerConcurrency
+  queeRegistry.jobLeaseTimeoutMs = DefaultJobLeaseTimeoutMs
   withCancellationLock:
     cancelledJobs.clear()
     runningJobs.clear()

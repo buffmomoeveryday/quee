@@ -1,8 +1,14 @@
-import std/[json, os]
+import std/[json, os, times]
 import ./[backend, priority, schedule, types]
 
 type
-  MemoryJob = tuple[queue: string, payload: JsonNode]
+  MemoryJob = object
+    queue: string
+    payload: JsonNode
+    state: string
+    leasedUntil: int64
+    leaseId: string
+    attempts: int
 
   MemoryBackend* = ref object of QueueBackend
     basePath: string
@@ -30,17 +36,26 @@ method storagePath*(backend: MemoryBackend; queue: string): string {.gcsafe.} =
 
 method enqueue*(backend: MemoryBackend; queue: string; payload: JsonNode) {.gcsafe.} =
   {.cast(gcsafe).}:
-    backend.jobs.add((queue, payload))
+    backend.jobs.add(MemoryJob(queue: queue, payload: payload, state: "queued"))
+
+proc nowMillis(): int64 =
+  int64(epochTime() * 1000.0)
+
+proc newLeaseId(jobId: string; leasedUntil: int64): string =
+  jobId & "|" & $leasedUntil
 
 method claimDue*(
-  backend: MemoryBackend; queue: string; blockedTasks: openArray[string]
+  backend: MemoryBackend; queue: string; blockedTasks: openArray[string]; leaseTimeoutMs: int
 ): ClaimedJob {.gcsafe.} =
   {.cast(gcsafe).}:
+    let nowMs = nowMillis()
     var bestIndex = -1
     var bestPriority = MaxPriority + 1
 
     for i, job in backend.jobs:
-      if job.queue == queue and isJobDue($job.payload) and
+      if job.queue == queue and
+          (job.state == "queued" or (job.state == "running" and job.leasedUntil <= nowMs)) and
+          isJobDue($job.payload) and
           not job.payload.isBlockedTask(blockedTasks):
         let priority = jobPriority(job.payload)
         if bestIndex < 0 or priority < bestPriority:
@@ -48,14 +63,46 @@ method claimDue*(
           bestPriority = priority
 
     if bestIndex >= 0:
+      backend.jobs[bestIndex].state = "running"
+      backend.jobs[bestIndex].leasedUntil = nowMs + leaseTimeoutMs.int64
+      backend.jobs[bestIndex].leaseId =
+        newLeaseId(backend.jobs[bestIndex].payload["id"].getStr(), backend.jobs[bestIndex].leasedUntil)
+      inc backend.jobs[bestIndex].attempts
       let payload = backend.jobs[bestIndex].payload
-      backend.jobs.delete(bestIndex)
-      result = ClaimedJob(id: payload["id"].getStr(), payload: payload)
+      result = ClaimedJob(
+        id: payload["id"].getStr(),
+        leaseId: backend.jobs[bestIndex].leaseId,
+        payload: payload,
+      )
+
+method complete*(
+  backend: MemoryBackend; queue: string; jobId: string; leaseId: string; nextPayload: JsonNode = nil
+) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    var completed = false
+    for i, job in backend.jobs:
+      if job.queue == queue and job.state == "running" and job.leaseId == leaseId and
+          job.payload["id"].getStr() == jobId:
+        backend.jobs.delete(i)
+        completed = true
+        break
+    if completed and nextPayload != nil:
+      backend.jobs.add(MemoryJob(queue: queue, payload: nextPayload, state: "queued"))
+
+method release*(backend: MemoryBackend; queue: string; jobId: string; leaseId: string) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    for job in backend.jobs.mitems:
+      if job.queue == queue and job.state == "running" and job.leaseId == leaseId and
+          job.payload["id"].getStr() == jobId:
+        job.state = "queued"
+        job.leasedUntil = 0
+        job.leaseId = ""
+        break
 
 method cancel*(backend: MemoryBackend; queue: string; jobId: string): bool {.gcsafe.} =
   {.cast(gcsafe).}:
     for i, job in backend.jobs:
-      if job.queue == queue and job.payload["id"].getStr() == jobId:
+      if job.queue == queue and job.state == "queued" and job.payload["id"].getStr() == jobId:
         backend.jobs.delete(i)
         return true
 
@@ -63,7 +110,7 @@ method discardMissed*(backend: MemoryBackend; queue: string): int {.gcsafe.} =
   {.cast(gcsafe).}:
     var kept: seq[MemoryJob] = @[]
     for job in backend.jobs:
-      if job.queue != queue or not isJobDue($job.payload):
+      if job.queue != queue or job.state != "queued" or not isJobDue($job.payload):
         kept.add(job)
       else:
         inc result
@@ -73,5 +120,5 @@ method discardMissed*(backend: MemoryBackend; queue: string): int {.gcsafe.} =
         if schedule.kind != skOnce:
           var payload = job.payload
           payload["runAt"] = %computeNextRunAt(schedule)
-          kept.add((job.queue, payload))
+          kept.add(MemoryJob(queue: job.queue, payload: payload, state: "queued"))
     backend.jobs = kept

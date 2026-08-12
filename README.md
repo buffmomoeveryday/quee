@@ -7,6 +7,7 @@ A lightweight background job queue for Nim. Define tasks with a macro, enqueue w
 - **Task macro** — declare handlers with typed parameters
 - **Fluent scheduling** — run now, delay, intervals, cron, daily/weekly
 - **Durable storage** — jobs survive process restarts with the built-in SQLite backend
+- **At-least-once delivery** — claimed jobs use leases and are retried after handler failure or lease expiry
 - **In-memory storage** — run without disk persistence for tests and ephemeral workloads
 - **Pluggable backends** — provide a `QueueBackend` for Redis, Postgres, or another store
 - **Background workers** — configurable thread pool (`concurrency`, like Celery `-c`) and poll interval
@@ -142,7 +143,22 @@ PRAGMA busy_timeout = 5000;
 PRAGMA temp_store = MEMORY;
 ```
 
-Custom backends subclass `QueueBackend` and pass an instance to `initQuee`. `claimDue` must atomically claim and remove one due job so concurrent workers cannot run the same payload twice:
+### Delivery guarantee
+
+With the SQLite backend, queued jobs are persisted until a worker leases them. A successful handler completes the lease and deletes the one-shot job. A failed handler releases the job for retry. If a process crashes after leasing a job but before completion, another worker can claim it after the lease timeout.
+
+This is an **at-least-once** guarantee: a job should not be lost after it is durably enqueued, but it may run more than once after a crash, timeout, or retry. Task handlers should therefore be idempotent when they perform external side effects.
+
+The default lease timeout is 30 seconds:
+
+```nim
+initQuee("./mydb", jobLeaseTimeoutMs = 30_000)
+setJobLeaseTimeout(60_000)
+```
+
+The in-memory backend follows the same lease/retry lifecycle while the process is alive, but it is not durable across process exits.
+
+Custom backends subclass `QueueBackend` and pass an instance to `initQuee`. `claimDue` must atomically lease one due job so concurrent workers cannot run the same payload at the same time. Leased jobs must become claimable again after `leaseTimeoutMs` unless `complete` is called:
 
 ```nim
 import std/json
@@ -161,9 +177,17 @@ method enqueue(backend: RedisBackend; queue: string; payload: JsonNode) {.gcsafe
   discard # write payload using jobStorageKey(payload) or an equivalent ordered key
 
 method claimDue(
-  backend: RedisBackend; queue: string; blockedTasks: openArray[string]
+  backend: RedisBackend; queue: string; blockedTasks: openArray[string]; leaseTimeoutMs: int
 ): ClaimedJob {.gcsafe.} =
-  discard # atomically pop one due job, skipping blockedTasks; return default when none is due
+  discard # atomically lease one due job, skipping blockedTasks; return default when none is due
+
+method complete(
+  backend: RedisBackend; queue: string; jobId: string; leaseId: string; nextPayload: JsonNode = nil
+) {.gcsafe.} =
+  discard # delete the leased job, or atomically replace it with nextPayload for recurring jobs
+
+method release(backend: RedisBackend; queue: string; jobId: string; leaseId: string) {.gcsafe.} =
+  discard # make a failed leased job immediately claimable again
 
 initQuee("./mydb", backend = RedisBackend())
 ```
@@ -323,6 +347,7 @@ proc initQuee*(
   queues = ["default"];
   pollIntervalMs = 200;
   workerConcurrency = 1;
+  jobLeaseTimeoutMs = 30_000;
   skipMissedJobs = false;
   backendKind = bkSqlite;
   backend: QueueBackend = nil
@@ -344,6 +369,12 @@ proc setPollInterval*(ms: int)
 proc pollInterval*(): int
   ## Current poll interval in milliseconds.
 
+proc setJobLeaseTimeout*(ms: int)
+  ## Set claimed-job lease timeout in milliseconds. Minimum 1.
+
+proc jobLeaseTimeout*(): int
+  ## Current job lease timeout in milliseconds.
+
 proc setWorkerConcurrency*(n: int)
   ## Worker threads for next ``startQuee`` (1..64).
 
@@ -362,6 +393,7 @@ proc waitForQuee*()
 type BackendKind = enum bkSqlite, bkMemory
 type ClaimedJob = object
   id: string
+  leaseId: string
   payload: JsonNode
 type QueueBackend = ref object of RootObj
 
@@ -370,9 +402,11 @@ method close(backend: QueueBackend)
 method storagePath(backend: QueueBackend; queue: string): string
 method enqueue(backend: QueueBackend; queue: string; payload: JsonNode)
 method claimDue(
-  backend: QueueBackend; queue: string; blockedTasks: openArray[string]
+  backend: QueueBackend; queue: string; blockedTasks: openArray[string]; leaseTimeoutMs: int
 ): ClaimedJob
 method requeue(backend: QueueBackend; queue: string; payload: JsonNode)
+method complete(backend: QueueBackend; queue: string; jobId: string; leaseId: string; nextPayload: JsonNode = nil)
+method release(backend: QueueBackend; queue: string; jobId: string; leaseId: string)
 method cancel(backend: QueueBackend; queue: string; jobId: string): bool
 method discardMissed(backend: QueueBackend; queue: string): int
 

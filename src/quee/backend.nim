@@ -6,17 +6,19 @@ type
     bkMemory
 
   ClaimedJob* = object
-    ## A job atomically claimed by a backend.
+    ## A job atomically leased by a backend.
     ##
     ## Return the empty/default value when no due job is available.
     id*: string
+    leaseId*: string
     payload*: JsonNode
 
   QueueBackend* = ref object of RootObj
     ## Storage backend interface.
     ##
-    ## Custom backends should atomically remove a due job from storage in
-    ## ``claimDue`` so multiple workers cannot run the same job.
+    ## Custom backends should atomically lease a due job in ``claimDue`` so
+    ## multiple workers cannot run the same job. Leased jobs must become
+    ## claimable again after ``leaseTimeoutMs`` if they are not completed.
 
 method setup*(backend: QueueBackend; basePath: string; queues: openArray[string]) {.base, gcsafe.} =
   ## Open/create backend storage for the configured queues.
@@ -35,14 +37,25 @@ method enqueue*(backend: QueueBackend; queue: string; payload: JsonNode) {.base,
   raise newException(CatchableError, "backend enqueue is not implemented")
 
 method claimDue*(
-  backend: QueueBackend; queue: string; blockedTasks: openArray[string]
+  backend: QueueBackend; queue: string; blockedTasks: openArray[string]; leaseTimeoutMs: int
 ): ClaimedJob {.base, gcsafe.} =
-  ## Atomically claim and remove one due job from a queue.
+  ## Atomically lease one due job from a queue.
   raise newException(CatchableError, "backend claimDue is not implemented")
 
 method requeue*(backend: QueueBackend; queue: string; payload: JsonNode) {.base, gcsafe.} =
   ## Persist a recurring job's next run. Most backends can reuse ``enqueue``.
   backend.enqueue(queue, payload)
+
+method complete*(
+  backend: QueueBackend; queue: string; jobId: string; leaseId: string; nextPayload: JsonNode = nil
+) {.base, gcsafe.} =
+  ## Complete a leased job. Delete one-shot jobs, or atomically replace a
+  ## recurring job with ``nextPayload``.
+  raise newException(CatchableError, "backend complete is not implemented")
+
+method release*(backend: QueueBackend; queue: string; jobId: string; leaseId: string) {.base, gcsafe.} =
+  ## Release a leased job after handler failure so it can be retried.
+  raise newException(CatchableError, "backend release is not implemented")
 
 method cancel*(backend: QueueBackend; queue: string; jobId: string): bool {.base, gcsafe.} =
   ## Remove a queued job by id. Return false if not found or unsupported.

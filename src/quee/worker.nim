@@ -14,13 +14,15 @@ proc nextRecurringPayload(payload: JsonNode): JsonNode =
 proc processOneInQueue(queue: string): bool =
   var payload: JsonNode
   var runningJobId = ""
+  var runningLeaseId = ""
   var runningTaskName = ""
 
   withQueeDbLock:
-    let claimed = currentBackend().claimDue(queue, blockedTaskNames())
+    let claimed = currentBackend().claimDue(queue, blockedTaskNames(), jobLeaseTimeout())
     if claimed.id.len > 0:
       payload = claimed.payload
       runningJobId = claimed.id
+      runningLeaseId = claimed.leaseId
       runningTaskName = payload["taskName"].getStr()
       markJobRunning(runningJobId, runningTaskName)
 
@@ -38,9 +40,18 @@ proc processOneInQueue(queue: string): bool =
       else:
         queeWarn("No handler registered for: " & runningTaskName)
 
-    if sched.kind != skOnce and not jobCancellationRequested(runningJobId):
-      withQueeDbLock:
-        currentBackend().requeue(queue, nextRecurringPayload(payload))
+    let nextPayload =
+      if sched.kind != skOnce and not jobCancellationRequested(runningJobId):
+        nextRecurringPayload(payload)
+      else:
+        nil
+
+    withQueeDbLock:
+      currentBackend().complete(queue, runningJobId, runningLeaseId, nextPayload)
+  except CatchableError:
+    queeWarn("Job failed and was released for retry: " & runningTaskName & " (" & runningJobId & ")")
+    withQueeDbLock:
+      currentBackend().release(queue, runningJobId, runningLeaseId)
   finally:
     if runningJobId.len > 0:
       unmarkJobRunning(runningJobId, runningTaskName)
