@@ -6,8 +6,9 @@ A lightweight background job queue for Nim. Define tasks with a macro, enqueue w
 
 - **Task macro** — declare handlers with typed parameters
 - **Fluent scheduling** — run now, delay, intervals, cron, daily/weekly
-- **Durable storage** — jobs survive process restarts with built-in LIMDB/LMDB or SQLite backends
-- **Pluggable backends** — provide a `QueueBackend` for Redis, Postgres, memory, or another store
+- **Durable storage** — jobs survive process restarts with the built-in SQLite backend
+- **In-memory storage** — run without disk persistence for tests and ephemeral workloads
+- **Pluggable backends** — provide a `QueueBackend` for Redis, Postgres, or another store
 - **Background workers** — configurable thread pool (`concurrency`, like Celery `-c`) and poll interval
 - **HTTP-friendly** — works with frameworks like [mummy](https://github.com/nim-lang/mummy) (see below)
 
@@ -112,22 +113,24 @@ discard sendEmail.enqueue("a@b.com", queue = "urgent").run()
 
 Resolution: ``queue =`` at enqueue → task's ``queue "…"`` line → `"default"`.
 
-With the default LIMDB backend, each queue is stored under `{dbPath}/{queueName}/`. The worker polls every queue round-robin.
+With the default SQLite backend, all queues are stored in `{dbPath}/quee.sqlite3`. The worker
+polls every queue round-robin.
 
 ## Storage Backends
 
-LIMDB/LMDB is the default backend:
+SQLite is the default backend and stores all queues in `{path}/quee.sqlite3`:
 
 ```nim
 initQuee("./mydb")
 # same as:
-initQuee("./mydb", backendKind = bkLimdb)
+initQuee("./mydb", backendKind = bkSqlite)
 ```
 
-SQLite is built in and stores all queues in `{path}/quee.sqlite3`:
+The in-memory backend stores nothing on disk and loses all queued jobs when it is closed or the
+process exits:
 
 ```nim
-initQuee("./mydb", backendKind = bkSqlite)
+initQuee("unused", backendKind = bkMemory)
 ```
 
 The SQLite backend applies these pragmas on open:
@@ -165,7 +168,7 @@ method claimDue(
 initQuee("./mydb", backend = RedisBackend())
 ```
 
-See `src/examples/backendExample.nim` for a complete custom in-memory backend.
+See `src/examples/backendExample.nim` for both built-in backends.
 
 ### Job priority
 
@@ -321,7 +324,7 @@ proc initQuee*(
   pollIntervalMs = 200;
   workerConcurrency = 1;
   skipMissedJobs = false;
-  backendKind = bkLimdb;
+  backendKind = bkSqlite;
   backend: QueueBackend = nil
 )
   ## Create/open job storage with a built-in or custom backend.
@@ -356,7 +359,7 @@ proc waitForQuee*()
 ### Backends
 
 ```nim
-type BackendKind = enum bkLimdb, bkSqlite
+type BackendKind = enum bkSqlite, bkMemory
 type ClaimedJob = object
   id: string
   payload: JsonNode
@@ -373,8 +376,8 @@ method requeue(backend: QueueBackend; queue: string; payload: JsonNode)
 method cancel(backend: QueueBackend; queue: string; jobId: string): bool
 method discardMissed(backend: QueueBackend; queue: string): int
 
-proc newLimdbBackend(): LimdbBackend
 proc newSqliteBackend(): SqliteBackend
+proc newMemoryBackend(): MemoryBackend
 proc jobStorageKey(payload: JsonNode): string
 ```
 
@@ -485,7 +488,7 @@ nim c --threads:on --mm:arc --path:src src/examples/exampleScheduler.nim
 - `src/examples/workerConfigExample.nim` — poll interval and concurrency configuration.
 - `src/examples/deployUpdateExample.nim` — skip missed jobs on app restart/deploy.
 - `src/examples/cancellationExample.nim` — cancel queued jobs and cooperatively stop a running job.
-- `src/examples/backendExample.nim` — switch between LIMDB, SQLite, and a custom backend.
+- `src/examples/backendExample.nim` — switch between the SQLite and in-memory backends.
 - `src/examples/concurrencyExample.nim` — background worker concurrency with slow simulated work.
 - `src/examples/exampleScheduler.nim` — long-running SQLite-backed scheduler with interval, delayed, daily, weekly, queue, priority, poll interval, and concurrency usage.
 - `src/examples/mummyWebServerExample.nim` — enqueue background work from a Mummy HTTP handler.
@@ -516,8 +519,8 @@ src/
     types.nim           # TaskHandler, JobBuilder, schedules
     registry.nim        # initQuee, registerHandler, global state
     backend.nim         # pluggable storage backend interface
-    limdbbackend.nim    # default LIMDB/LMDB backend
-    sqlitebackend.nim   # SQLite backend
+    sqlitebackend.nim   # durable SQLite backend
+    memorybackend.nim   # ephemeral in-memory backend
     schedule.nim        # cron, run-at math, isJobDue
     builder.nim         # enqueue fluent API
     worker.nim          # background thread, processOne
@@ -542,7 +545,7 @@ flowchart TB
   subgraph setup["Setup"]
     INIT["initQuee(path, queues)"]
     TASK["task myJob(...):\n  queue \"emails\"\n  priority 3\n  ...logic..."]
-    INIT --> STORE["configured backend\nLIMDB, SQLite, custom"]
+    INIT --> STORE["configured backend\nSQLite, memory, custom"]
     TASK --> REG["registerTask(name, queue, handler)"]
   end
 

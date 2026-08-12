@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.1.0"
+version       = "0.1.1"
 author        = "Siddhartha Khanal"
 description   = "Lightweight background job queue for Nim with fluent scheduling"
 license       = "MIT"
@@ -12,7 +12,6 @@ srcDir        = "src"
 requires "nim >= 2.0.8"
 
 requires "malebolgia >= 0.1.0"
-requires "limdb"
 requires "db_connector"
 requires "mummy"
 

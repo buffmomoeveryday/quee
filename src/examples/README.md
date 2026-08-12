@@ -20,7 +20,7 @@ nimble buildExamples
 - `workerConfigExample.nim` - poll interval and worker concurrency configuration without starting a long-running worker.
 - `deployUpdateExample.nim` - skip missed jobs on app restart/deploy with `skipMissedJobs = true`.
 - `cancellationExample.nim` - cancel queued jobs and cooperatively stop a running job.
-- `backendExample.nim` - switch between LIMDB, SQLite, and a custom in-memory backend.
+- `backendExample.nim` - switch between the built-in SQLite and in-memory backends.
 - `concurrencyExample.nim` - background worker concurrency with slow simulated external work.
 - `exampleScheduler.nim` - long-running SQLite-backed scheduler with interval, delayed, daily, weekly, queue, priority, poll interval, and concurrency examples.
 - `mummyWebServerExample.nim` - enqueue background jobs from a Mummy HTTP request handler.

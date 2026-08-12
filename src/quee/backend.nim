@@ -2,8 +2,8 @@ import std/[json, strformat]
 
 type
   BackendKind* = enum
-    bkLimdb
     bkSqlite
+    bkMemory
 
   ClaimedJob* = object
     ## A job atomically claimed by a backend.
@@ -57,8 +57,8 @@ proc backendNotConfigured*(): ref CatchableError =
 
 proc backendName*(kind: BackendKind): string =
   case kind
-  of bkLimdb: "limdb"
   of bkSqlite: "sqlite"
+  of bkMemory: "memory"
 
 proc unknownBackend*(kind: BackendKind): ref CatchableError =
   newException(CatchableError, &"unknown backend: {backendName(kind)}")

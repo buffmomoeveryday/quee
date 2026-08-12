@@ -1,5 +1,5 @@
 import std/[locks, random, tables, terminal]
-import ./[types, log, priority, backend, limdbbackend, sqlitebackend]
+import ./[types, log, priority, backend, memorybackend, sqlitebackend]
 
 var activeBackend: QueueBackend
 
@@ -93,10 +93,10 @@ proc pollInterval*(): int =
 
 proc newBackend*(kind: BackendKind): QueueBackend =
   case kind
-  of bkLimdb:
-    newLimdbBackend()
   of bkSqlite:
     newSqliteBackend()
+  of bkMemory:
+    newMemoryBackend()
 
 proc currentBackend*(): QueueBackend {.gcsafe.} =
   {.cast(gcsafe).}:
@@ -232,7 +232,7 @@ proc initQuee*(
   pollIntervalMs: int = DefaultPollIntervalMs;
   workerConcurrency: int = DefaultWorkerConcurrency,
   skipMissedJobs: bool = false,
-  backendKind: BackendKind = bkLimdb,
+  backendKind: BackendKind = bkSqlite,
   backend: QueueBackend = nil,
 ) =
   ## Open or create the job store using the selected or provided backend.

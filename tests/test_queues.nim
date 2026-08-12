@@ -1,4 +1,4 @@
-import std/[os, unittest]
+import std/unittest
 import quee
 import helpers
 
@@ -21,26 +21,22 @@ suite "multi-queue":
   teardown:
     teardownQuee(dbPath)
 
-  test "enqueue targets queue subdirectory":
-    discard onDefault.enqueue().run()
-    check dirExists(dbPath / "default")
-    check processOne()
-    check hits == 1
+  test "enqueue targets default queue":
+    let job = onDefault.enqueue().run()
+    check cancelJob(job.id, queue = "default")
+    check not processOne()
 
   test "task using clause picks queue":
-    hits = 0
-    discard onEmails.enqueue().run()
-    check dirExists(dbPath / "emails")
-    check processOne()
-    check hits == 1
+    let job = onEmails.enqueue().run()
+    check not cancelJob(job.id, queue = "default")
+    check cancelJob(job.id, queue = "emails")
+    check not processOne()
 
   test "runtime queue= overrides task default":
-    hits = 0
-    discard onEmails.enqueue(queue = "urgent").run()
-    check dirExists(dbPath / "urgent")
-    hits = 0
-    check processOne()
-    check hits == 1
+    let job = onEmails.enqueue(queue = "urgent").run()
+    check not cancelJob(job.id, queue = "emails")
+    check cancelJob(job.id, queue = "urgent")
+    check not processOne()
 
   test "unknown queue raises":
     expect ValueError:

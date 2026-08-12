@@ -11,7 +11,7 @@
 import quee/[
   types,
   backend,
-  limdbbackend,
+  memorybackend,
   sqlitebackend,
   registry,
   schedule,
@@ -26,7 +26,7 @@ import quee/[
 
 export types
 export backend
-export limdbbackend
+export memorybackend
 export sqlitebackend
 export registry
 export closeQueueDatabases
