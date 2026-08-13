@@ -56,6 +56,27 @@ proc failedJobFromRow(queue, rawPayload, attempts, lastError: string): FailedJob
   if "taskName" in payload:
     result.taskName = payload["taskName"].getStr()
 
+proc snapshotFromRow(
+  queue, rawPayload, state, leasedUntil, attempts, lastError: string
+): JobSnapshot =
+  let payload = parseJson(rawPayload)
+  result = JobSnapshot(
+    queue: queue,
+    state: state,
+    leasedUntilMs: parseBiggestInt(leasedUntil).int64,
+    attempts: parseInt(attempts),
+    lastError: lastError,
+    payload: payload,
+  )
+  if "id" in payload:
+    result.id = payload["id"].getStr()
+  if "taskName" in payload:
+    result.taskName = payload["taskName"].getStr()
+  if "priority" in payload:
+    result.priority = jobPriority(payload)
+  if "runAt" in payload:
+    result.runAt = payload["runAt"].getFloat()
+
 proc isBlockedTask(payload: JsonNode; blockedTasks: openArray[string]): bool =
   if blockedTasks.len == 0 or "taskName" notin payload:
     return false
@@ -451,6 +472,20 @@ method deleteFailed*(backend: SqliteBackend; queue: string; jobId: string): bool
     except CatchableError:
       db.execSql(sql"ROLLBACK")
       raise
+
+method listJobs*(backend: SqliteBackend; queue: string): seq[JobSnapshot] {.gcsafe.} =
+  {.cast(gcsafe).}:
+    let db = backend.requireDb()
+    for row in db.fastRows(
+      sql"""
+        SELECT payload, state, leased_until, attempts, last_error
+        FROM jobs
+        WHERE queue = ?
+        ORDER BY state, storage_key
+      """,
+      queue,
+    ):
+      result.add(snapshotFromRow(queue, row[0], row[1], row[2], row[3], row[4]))
 
 method discardMissed*(backend: SqliteBackend; queue: string): int {.gcsafe.} =
   {.cast(gcsafe).}:

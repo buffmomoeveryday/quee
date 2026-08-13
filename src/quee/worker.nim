@@ -1,5 +1,5 @@
 import std/[json, os, strutils, tables]
-import ./[types, backend, registry, schedule, log]
+import ./[types, backend, registry, schedule, log, dashboard]
 
 var workerThreads: seq[Thread[void]]
 var workersRunning = false
@@ -77,7 +77,7 @@ proc processOne*(): bool {.gcsafe.} =
     queues = queeRegistry.queues
 
   for queue in queues:
-    if processOneInQueue(queue):
+    if not queueIsPaused(queue) and processOneInQueue(queue):
       return true
 
   false
@@ -117,6 +117,7 @@ proc startQuee*(pollIntervalMs: int = 0; concurrency: int = 0) =
     pollMs = queeRegistry.pollIntervalMs
 
   printRegisteredTasks()
+  startMonitoringDashboard()
   queeInfo(
     "Background worker started (concurrency " & $n & ", poll " & $pollMs &
       "ms, queues: " & names.join(", ") & ")",

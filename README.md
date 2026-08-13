@@ -11,6 +11,7 @@ A lightweight background job queue for Nim. Define tasks with a macro, enqueue w
 - **In-memory storage** — run without disk persistence for tests and ephemeral workloads
 - **Pluggable backends** — provide a `QueueBackend` for Redis, Postgres, or another store
 - **Background workers** — configurable thread pool (`concurrency`, like Celery `-c`) and poll interval
+- **Monitoring dashboard** — optional Basic Auth dashboard with server-rendered HTML and HTMX refreshes
 - **HTTP-friendly** — works with frameworks like [mummy](https://github.com/nim-lang/mummy) (see below)
 
 ## Requirements
@@ -374,6 +375,29 @@ Each thread runs the same loop: atomically claim a due job from the configured b
 
 Calling `startQuee()` twice without `waitForQuee()` raises an error. Multi-process scaling (several app instances sharing `./mydb`) is possible but not managed by Quee.
 
+## Monitoring dashboard
+
+Quee can start a standalone dashboard alongside the worker. It is disabled by default and protected with HTTP Basic Auth:
+
+```bash
+export QUEE_DASHBOARD_USERNAME=admin
+export QUEE_DASHBOARD_PASSWORD='change-me'
+```
+
+```nim
+initQuee(
+  "./mydb",
+  monitoringDashboardEnabled = true,
+  monitoringDashboardHost = "127.0.0.1",
+  monitoringDashboardPort = 5555,
+  monitoringDashboardPath = "/quee",
+)
+
+startQuee()
+```
+
+Open `http://127.0.0.1:5555/quee`. The dashboard is rendered server-side with Karax, uses HTMX polling for live panels, and serves vendored CSS. It shows queue counts, task metadata, and job rows, with controls to pause/resume queues, retry/delete failed jobs, and cancel queued jobs.
+
 ## API reference
 
 ### Setup
@@ -390,7 +414,11 @@ proc initQuee*(
   retryBackoff = 2.0;
   skipMissedJobs = false;
   backendKind = bkSqlite;
-  backend: QueueBackend = nil
+  backend: QueueBackend = nil;
+  monitoringDashboardEnabled = false;
+  monitoringDashboardHost = "127.0.0.1";
+  monitoringDashboardPort = 5555;
+  monitoringDashboardPath = "/quee"
 )
   ## Create/open job storage with a built-in or custom backend.
 
@@ -408,6 +436,17 @@ proc retryFailedJob*(jobId: string; queue = ""): bool
 
 proc deleteFailedJob*(jobId: string; queue = ""): bool
   ## Delete a failed job without retrying it.
+
+proc listJobs*(queue = ""): seq[JobSnapshot]
+  ## List read-only job snapshots. Empty queue searches all queues.
+
+proc queueStats*(queue = ""): seq[QueueStats]
+  ## Aggregate queued, running, failed, and scheduled counts.
+
+proc pauseQueue*(queue: string)
+proc resumeQueue*(queue: string)
+proc queueIsPaused*(queue: string): bool
+  ## Pause/resume worker processing for a queue without deleting jobs.
 
 proc cancellationRequested*(): bool
   ## True inside a running task after cancellation has been requested.
@@ -447,6 +486,15 @@ proc setWorkerConcurrency*(n: int)
   ## Worker threads for next ``startQuee`` (1..64).
 
 proc workerConcurrency*(): int
+
+proc setMonitoringDashboardEnabled*(enabled: bool)
+proc monitoringDashboardEnabled*(): bool
+proc setMonitoringDashboardHost*(host: string)
+proc monitoringDashboardHost*(): string
+proc setMonitoringDashboardPort*(port: int)
+proc monitoringDashboardPort*(): int
+proc setMonitoringDashboardPath*(path: string)
+proc monitoringDashboardPath*(): string
 
 proc startQuee*(pollIntervalMs: int = 0; concurrency: int = 0)
   ## Start worker thread(s). Named ``concurrency`` sets parallel workers (Celery ``-c``).
@@ -499,6 +547,7 @@ method cancel(backend: QueueBackend; queue: string; jobId: string): bool
 method listFailed(backend: QueueBackend; queue: string): seq[FailedJob]
 method retryFailed(backend: QueueBackend; queue: string; jobId: string): bool
 method deleteFailed(backend: QueueBackend; queue: string; jobId: string): bool
+method listJobs(backend: QueueBackend; queue: string): seq[JobSnapshot]
 method discardMissed(backend: QueueBackend; queue: string): int
 
 proc newSqliteBackend(): SqliteBackend

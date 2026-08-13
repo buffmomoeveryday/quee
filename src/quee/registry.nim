@@ -1,4 +1,4 @@
-import std/[locks, random, tables, terminal]
+import std/[locks, random, tables, terminal, times]
 import ./[types, log, priority, backend, memorybackend, sqlitebackend]
 
 var activeBackend: QueueBackend
@@ -11,6 +11,9 @@ const
   DefaultMaxAttempts* = 3
   DefaultRetryDelayMs* = 1_000
   DefaultRetryBackoff* = 2.0
+  DefaultMonitoringDashboardHost* = "127.0.0.1"
+  DefaultMonitoringDashboardPort* = 5555
+  DefaultMonitoringDashboardPath* = "/quee"
 
 var queeDbLock: Lock
 var queeDbLockInitialized = false
@@ -19,6 +22,7 @@ var cancellationLockInitialized = false
 var cancelledJobs = initTable[string, bool]()
 var runningJobs = initTable[string, bool]()
 var runningTaskCounts = initTable[string, int]()
+var pausedQueues = initTable[string, bool]()
 var currentJobId {.threadvar.}: string
 var currentQueue {.threadvar.}: string
 var currentLeaseId {.threadvar.}: string
@@ -61,6 +65,10 @@ var queeRegistry* {.global.}: QueeRegistry = QueeRegistry(
     maxAttempts: DefaultMaxAttempts,
     retryDelayMs: DefaultRetryDelayMs,
     retryBackoff: DefaultRetryBackoff,
+    monitoringDashboardEnabled: false,
+    monitoringDashboardHost: DefaultMonitoringDashboardHost,
+    monitoringDashboardPort: DefaultMonitoringDashboardPort,
+    monitoringDashboardPath: DefaultMonitoringDashboardPath,
 )
 
 proc validateWorkerConcurrency*(n: int) =
@@ -107,6 +115,46 @@ proc validateRetryDelay*(ms: int) =
 proc validateRetryBackoff*(factor: float) =
   if factor < 1.0:
     raise newException(ValueError, "retry backoff must be >= 1.0, got " & $factor)
+
+proc validateMonitoringDashboardPort*(port: int) =
+  if port < 1 or port > 65_535:
+    raise newException(ValueError, "monitoring dashboard port must be 1..65535, got " & $port)
+
+proc normalizeDashboardPath(path: string): string =
+  if path.len == 0:
+    return DefaultMonitoringDashboardPath
+  result =
+    if path[0] == '/': path
+    else: "/" & path
+  while result.len > 1 and result[^1] == '/':
+    result.setLen(result.len - 1)
+
+proc setMonitoringDashboardEnabled*(enabled: bool) =
+  ## Enable or disable the standalone monitoring dashboard for the next ``startQuee``.
+  queeRegistry.monitoringDashboardEnabled = enabled
+
+proc monitoringDashboardEnabled*(): bool =
+  queeRegistry.monitoringDashboardEnabled
+
+proc setMonitoringDashboardHost*(host: string) =
+  queeRegistry.monitoringDashboardHost =
+    if host.len == 0: DefaultMonitoringDashboardHost else: host
+
+proc monitoringDashboardHost*(): string =
+  queeRegistry.monitoringDashboardHost
+
+proc setMonitoringDashboardPort*(port: int) =
+  validateMonitoringDashboardPort(port)
+  queeRegistry.monitoringDashboardPort = port
+
+proc monitoringDashboardPort*(): int =
+  queeRegistry.monitoringDashboardPort
+
+proc setMonitoringDashboardPath*(path: string) =
+  queeRegistry.monitoringDashboardPath = normalizeDashboardPath(path)
+
+proc monitoringDashboardPath*(): string =
+  queeRegistry.monitoringDashboardPath
 
 proc setPollInterval*(ms: int) =
   ## Set how long the worker sleeps when no job is due (milliseconds). Safe before or after ``startQuee``.
@@ -251,6 +299,40 @@ proc blockedTaskNames*(): seq[string] {.gcsafe.} =
             runningTaskCounts.getOrDefault(taskName, 0) >= info.taskConcurrency:
           result.add(taskName)
 
+proc runningTaskCount*(taskName: string): int {.gcsafe.} =
+  ## Number of currently running jobs for a registered task.
+  {.cast(gcsafe).}:
+    withCancellationLock:
+      result = runningTaskCounts.getOrDefault(taskName, 0)
+
+proc pauseQueue*(queue: string) =
+  ## Pause worker processing for a queue. Queued jobs remain stored.
+  if queue notin queeRegistry.queuePaths:
+    raise newException(ValueError, "Unknown queue: '" & queue & "'")
+  withCancellationLock:
+    pausedQueues[queue] = true
+
+proc resumeQueue*(queue: string) =
+  ## Resume worker processing for a paused queue.
+  if queue notin queeRegistry.queuePaths:
+    raise newException(ValueError, "Unknown queue: '" & queue & "'")
+  withCancellationLock:
+    pausedQueues.del(queue)
+
+proc queueIsPaused*(queue: string): bool {.gcsafe.} =
+  ## Whether worker processing is paused for ``queue``.
+  {.cast(gcsafe).}:
+    withCancellationLock:
+      result = pausedQueues.getOrDefault(queue, false)
+
+proc pausedQueueNames*(): seq[string] {.gcsafe.} =
+  ## Names of queues currently paused by operators.
+  {.cast(gcsafe).}:
+    withCancellationLock:
+      for queue, paused in pausedQueues:
+        if paused:
+          result.add(queue)
+
 proc cancelJob*(jobId: string; queue: string = ""): bool =
   ## Cancel a queued/scheduled job by id.
   ##
@@ -319,6 +401,35 @@ proc deleteFailedJob*(jobId: string; queue: string = ""): bool =
       if backend.deleteFailed(queueName, jobId):
         return true
 
+proc listJobs*(queue: string = ""): seq[JobSnapshot] =
+  ## List read-only job snapshots for monitoring.
+  let queues = managementQueues(queue)
+  withQueeDbLock:
+    let backend = currentBackend()
+    for queueName in queues:
+      result.add(backend.listJobs(queueName))
+
+proc queueStats*(queue: string = ""): seq[QueueStats] =
+  ## Aggregate queue state for monitoring.
+  let queues = managementQueues(queue)
+  let nowTs = epochTime()
+  withQueeDbLock:
+    let backend = currentBackend()
+    for queueName in queues:
+      var stats = QueueStats(name: queueName, paused: queueIsPaused(queueName))
+      for job in backend.listJobs(queueName):
+        case job.state
+        of "running":
+          inc stats.running
+        of "failed":
+          inc stats.failed
+        else:
+          if job.runAt > nowTs:
+            inc stats.scheduled
+          else:
+            inc stats.queued
+      result.add(stats)
+
 proc discardMissedJobs*(): int =
   ## Drop jobs that are already due without running them.
   ##
@@ -358,6 +469,10 @@ proc initQuee*(
   skipMissedJobs: bool = false,
   backendKind: BackendKind = bkSqlite,
   backend: QueueBackend = nil,
+  monitoringDashboardEnabled: bool = false,
+  monitoringDashboardHost: string = DefaultMonitoringDashboardHost,
+  monitoringDashboardPort: int = DefaultMonitoringDashboardPort,
+  monitoringDashboardPath: string = DefaultMonitoringDashboardPath,
 ) =
   ## Open or create the job store using the selected or provided backend.
   ##
@@ -369,6 +484,7 @@ proc initQuee*(
   validateMaxAttempts(maxAttempts)
   validateRetryDelay(retryDelayMs)
   validateRetryBackoff(retryBackoff)
+  validateMonitoringDashboardPort(monitoringDashboardPort)
   if "default" notin queues:
     raise newException(ValueError, "queues must include \"default\"")
 
@@ -388,6 +504,14 @@ proc initQuee*(
   queeRegistry.maxAttempts = maxAttempts
   queeRegistry.retryDelayMs = retryDelayMs
   queeRegistry.retryBackoff = retryBackoff
+  queeRegistry.monitoringDashboardEnabled = monitoringDashboardEnabled
+  queeRegistry.monitoringDashboardHost =
+    if monitoringDashboardHost.len == 0:
+      DefaultMonitoringDashboardHost
+    else:
+      monitoringDashboardHost
+  queeRegistry.monitoringDashboardPort = monitoringDashboardPort
+  queeRegistry.monitoringDashboardPath = normalizeDashboardPath(monitoringDashboardPath)
 
   queeRegistry.defaultQueue = "default"
 
@@ -469,7 +593,12 @@ proc resetQueeRegistry*() =
   queeRegistry.maxAttempts = DefaultMaxAttempts
   queeRegistry.retryDelayMs = DefaultRetryDelayMs
   queeRegistry.retryBackoff = DefaultRetryBackoff
+  queeRegistry.monitoringDashboardEnabled = false
+  queeRegistry.monitoringDashboardHost = DefaultMonitoringDashboardHost
+  queeRegistry.monitoringDashboardPort = DefaultMonitoringDashboardPort
+  queeRegistry.monitoringDashboardPath = DefaultMonitoringDashboardPath
   withCancellationLock:
     cancelledJobs.clear()
     runningJobs.clear()
     runningTaskCounts.clear()
+    pausedQueues.clear()

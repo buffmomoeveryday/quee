@@ -68,6 +68,21 @@ suite "enqueue and run":
     check processOne()
     check hitCount == 1
 
+  test "paused queue is skipped until resumed":
+    hitCount = 0
+    discard bumpCounter.enqueue().run()
+
+    pauseQueue("default")
+    check queueIsPaused("default")
+    check not processOne()
+    check hitCount == 0
+    check queueStats()[0].paused
+
+    resumeQueue("default")
+    check not queueIsPaused("default")
+    check processOne()
+    check hitCount == 1
+
 suite "startQuee worker":
   test "background worker runs jobs":
     hitCount = 0

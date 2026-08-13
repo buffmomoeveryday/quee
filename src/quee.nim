@@ -22,6 +22,7 @@ import quee/[
   log,
   priority,
   jobkey,
+  dashboard,
 ]
 
 export types
@@ -49,3 +50,4 @@ export tasksyntax
 export log
 export priority
 export jobkey
+export dashboard
