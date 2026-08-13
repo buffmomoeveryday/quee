@@ -150,6 +150,37 @@ method cancel*(backend: MemoryBackend; queue: string; jobId: string): bool {.gcs
         backend.jobs.delete(i)
         return true
 
+method listFailed*(backend: MemoryBackend; queue: string): seq[FailedJob] {.gcsafe.} =
+  {.cast(gcsafe).}:
+    for job in backend.jobs:
+      if job.queue == queue and job.state == "failed":
+        result.add(FailedJob(
+          id: job.payload["id"].getStr(),
+          queue: job.queue,
+          taskName: job.payload["taskName"].getStr(),
+          attempts: job.attempts,
+          lastError: job.lastError,
+          payload: job.payload,
+        ))
+
+method retryFailed*(backend: MemoryBackend; queue: string; jobId: string): bool {.gcsafe.} =
+  {.cast(gcsafe).}:
+    for job in backend.jobs.mitems:
+      if job.queue == queue and job.state == "failed" and job.payload["id"].getStr() == jobId:
+        job.state = "queued"
+        job.leasedUntil = 0
+        job.leaseId = ""
+        job.attempts = 0
+        job.lastError = ""
+        return true
+
+method deleteFailed*(backend: MemoryBackend; queue: string; jobId: string): bool {.gcsafe.} =
+  {.cast(gcsafe).}:
+    for i, job in backend.jobs:
+      if job.queue == queue and job.state == "failed" and job.payload["id"].getStr() == jobId:
+        backend.jobs.delete(i)
+        return true
+
 method discardMissed*(backend: MemoryBackend; queue: string): int {.gcsafe.} =
   {.cast(gcsafe).}:
     var kept: seq[MemoryJob] = @[]

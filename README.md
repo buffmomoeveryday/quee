@@ -400,6 +400,15 @@ proc discardMissedJobs*(): int
 proc cancelJob*(jobId: string; queue = ""): bool
   ## Cancel a queued job, or request cooperative cancellation for a running job.
 
+proc listFailedJobs*(queue = ""): seq[FailedJob]
+  ## List terminal failed jobs. Empty queue searches all queues.
+
+proc retryFailedJob*(jobId: string; queue = ""): bool
+  ## Move a failed job back to queued state with a fresh retry budget.
+
+proc deleteFailedJob*(jobId: string; queue = ""): bool
+  ## Delete a failed job without retrying it.
+
 proc cancellationRequested*(): bool
   ## True inside a running task after cancellation has been requested.
 
@@ -454,6 +463,13 @@ type ClaimedJob = object
   id: string
   leaseId: string
   payload: JsonNode
+type FailedJob = object
+  id: string
+  queue: string
+  taskName: string
+  attempts: int
+  lastError: string
+  payload: JsonNode
 type QueueBackend = ref object of RootObj
 
 method setup(backend: QueueBackend; basePath: string; queues: openArray[string])
@@ -480,6 +496,9 @@ method renewLease(
   backend: QueueBackend; queue: string; jobId: string; leaseId: string; leaseTimeoutMs: int
 ): bool
 method cancel(backend: QueueBackend; queue: string; jobId: string): bool
+method listFailed(backend: QueueBackend; queue: string): seq[FailedJob]
+method retryFailed(backend: QueueBackend; queue: string; jobId: string): bool
+method deleteFailed(backend: QueueBackend; queue: string; jobId: string): bool
 method discardMissed(backend: QueueBackend; queue: string): int
 
 proc newSqliteBackend(): SqliteBackend

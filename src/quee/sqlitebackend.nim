@@ -43,6 +43,19 @@ proc jobIdFromPayload(raw: string): string =
   else:
     ""
 
+proc failedJobFromRow(queue, rawPayload, attempts, lastError: string): FailedJob =
+  let payload = parseJson(rawPayload)
+  result = FailedJob(
+    queue: queue,
+    attempts: parseInt(attempts),
+    lastError: lastError,
+    payload: payload,
+  )
+  if "id" in payload:
+    result.id = payload["id"].getStr()
+  if "taskName" in payload:
+    result.taskName = payload["taskName"].getStr()
+
 proc isBlockedTask(payload: JsonNode; blockedTasks: openArray[string]): bool =
   if blockedTasks.len == 0 or "taskName" notin payload:
     return false
@@ -372,6 +385,72 @@ method cancel*(backend: SqliteBackend; queue: string; jobId: string): bool {.gcs
     if storageKey.len > 0:
       db.execSql(sql"DELETE FROM jobs WHERE queue = ? AND storage_key = ?", queue, storageKey)
       result = true
+
+method listFailed*(backend: SqliteBackend; queue: string): seq[FailedJob] {.gcsafe.} =
+  {.cast(gcsafe).}:
+    let db = backend.requireDb()
+    for row in db.fastRows(
+      sql"""
+        SELECT payload, attempts, last_error
+        FROM jobs
+        WHERE queue = ? AND state = 'failed'
+        ORDER BY storage_key
+      """,
+      queue,
+    ):
+      result.add(failedJobFromRow(queue, row[0], row[1], row[2]))
+
+method retryFailed*(backend: SqliteBackend; queue: string; jobId: string): bool {.gcsafe.} =
+  {.cast(gcsafe).}:
+    let db = backend.requireDb()
+    db.execSql(sql"BEGIN IMMEDIATE")
+    try:
+      var storageKey = ""
+      for row in db.fastRows(
+        sql"SELECT storage_key, payload FROM jobs WHERE queue = ? AND state = 'failed' ORDER BY storage_key",
+        queue,
+      ):
+        if row[0] == jobId or jobIdFromPayload(row[1]) == jobId:
+          storageKey = row[0]
+          break
+
+      if storageKey.len > 0:
+        db.execSql(
+          sql"""
+            UPDATE jobs
+            SET state = 'queued', leased_until = 0, lease_id = '', attempts = 0, last_error = ''
+            WHERE queue = ? AND storage_key = ?
+          """,
+          queue,
+          storageKey,
+        )
+        result = true
+      db.execSql(sql"COMMIT")
+    except CatchableError:
+      db.execSql(sql"ROLLBACK")
+      raise
+
+method deleteFailed*(backend: SqliteBackend; queue: string; jobId: string): bool {.gcsafe.} =
+  {.cast(gcsafe).}:
+    let db = backend.requireDb()
+    db.execSql(sql"BEGIN IMMEDIATE")
+    try:
+      var storageKey = ""
+      for row in db.fastRows(
+        sql"SELECT storage_key, payload FROM jobs WHERE queue = ? AND state = 'failed' ORDER BY storage_key",
+        queue,
+      ):
+        if row[0] == jobId or jobIdFromPayload(row[1]) == jobId:
+          storageKey = row[0]
+          break
+
+      if storageKey.len > 0:
+        db.execSql(sql"DELETE FROM jobs WHERE queue = ? AND storage_key = ?", queue, storageKey)
+        result = true
+      db.execSql(sql"COMMIT")
+    except CatchableError:
+      db.execSql(sql"ROLLBACK")
+      raise
 
 method discardMissed*(backend: SqliteBackend; queue: string): int {.gcsafe.} =
   {.cast(gcsafe).}:

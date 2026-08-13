@@ -5,6 +5,15 @@ type
     bkSqlite
     bkMemory
 
+  FailedJob* = object
+    ## A job that exhausted its retry budget and is waiting for operator action.
+    id*: string
+    queue*: string
+    taskName*: string
+    attempts*: int
+    lastError*: string
+    payload*: JsonNode
+
   ClaimedJob* = object
     ## A job atomically leased by a backend.
     ##
@@ -79,6 +88,18 @@ method renewLease*(
 
 method cancel*(backend: QueueBackend; queue: string; jobId: string): bool {.base, gcsafe.} =
   ## Remove a queued job by id. Return false if not found or unsupported.
+  false
+
+method listFailed*(backend: QueueBackend; queue: string): seq[FailedJob] {.base, gcsafe.} =
+  ## Return terminal failed jobs for ``queue``. Unsupported backends return an empty list.
+  @[]
+
+method retryFailed*(backend: QueueBackend; queue: string; jobId: string): bool {.base, gcsafe.} =
+  ## Move a terminal failed job back to the queued state. Return false if not found or unsupported.
+  false
+
+method deleteFailed*(backend: QueueBackend; queue: string; jobId: string): bool {.base, gcsafe.} =
+  ## Delete a terminal failed job. Return false if not found or unsupported.
   false
 
 method discardMissed*(backend: QueueBackend; queue: string): int {.base, gcsafe.} =

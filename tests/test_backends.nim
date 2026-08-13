@@ -1,4 +1,4 @@
-import std/[os, strutils, times, unittest]
+import std/[json, os, strutils, times, unittest]
 import db_connector/db_sqlite
 import quee
 import helpers
@@ -97,6 +97,70 @@ suite "storage backends":
     defer: db.close()
     check db.getValue(sql"SELECT state FROM jobs LIMIT 1") == "failed"
     check db.getValue(sql"SELECT last_error FROM jobs LIMIT 1") == "permanent failure"
+
+  test "sqlite backend lists and deletes failed jobs":
+    initQuee(dbPath, backendKind = bkSqlite, maxAttempts = 1, retryDelayMs = 0)
+    let job = backendAlwaysFail.enqueue().run()
+
+    check processOne()
+    let failed = listFailedJobs()
+    check failed.len == 1
+    check failed[0].id == job.id
+    check failed[0].queue == "default"
+    check failed[0].taskName == "backendAlwaysFail"
+    check failed[0].attempts == 1
+    check failed[0].lastError == "permanent failure"
+    check failed[0].payload["id"].getStr() == job.id
+
+    check deleteFailedJob(job.id)
+    check listFailedJobs().len == 0
+    check not deleteFailedJob(job.id)
+
+  test "sqlite backend retries failed jobs through public API":
+    initQuee(dbPath, backendKind = bkSqlite, maxAttempts = 1, retryDelayMs = 0)
+    let job = backendFlaky.enqueue().run()
+
+    check processOne()
+    check listFailedJobs().len == 1
+    check retryFailedJob(job.id)
+    check listFailedJobs().len == 0
+    check processOne()
+    check backendHits == @["attempt", "attempt"]
+    check not processOne()
+
+  test "sqlite backend manages failed jobs by queue":
+    initQuee(dbPath, queues = ["default", "emails"], backendKind = bkSqlite, maxAttempts = 1, retryDelayMs = 0)
+    let defaultJob = backendAlwaysFail.enqueue().run()
+    let emailJob = backendAlwaysFail.enqueue(queue = "emails").run()
+
+    check processOne()
+    check processOne()
+    check listFailedJobs().len == 2
+    check listFailedJobs(queue = "default").len == 1
+    check listFailedJobs(queue = "emails").len == 1
+    check listFailedJobs(queue = "default")[0].id == defaultJob.id
+    check listFailedJobs(queue = "emails")[0].id == emailJob.id
+
+    check not retryFailedJob(defaultJob.id, queue = "emails")
+    check retryFailedJob(emailJob.id, queue = "emails")
+    check listFailedJobs(queue = "emails").len == 0
+    check listFailedJobs(queue = "default").len == 1
+
+    check not deleteFailedJob(emailJob.id, queue = "emails")
+    check deleteFailedJob(defaultJob.id, queue = "default")
+    check listFailedJobs().len == 0
+
+  test "sqlite failed-job API handles empty ids and unknown queues":
+    initQuee(dbPath, backendKind = bkSqlite)
+
+    check not retryFailedJob("")
+    check not deleteFailedJob("")
+    expect ValueError:
+      discard listFailedJobs(queue = "missing")
+    expect ValueError:
+      discard retryFailedJob("job", queue = "missing")
+    expect ValueError:
+      discard deleteFailedJob("job", queue = "missing")
 
   test "sqlite backend retries expired leased jobs":
     initQuee(dbPath, backendKind = bkSqlite, jobLeaseTimeoutMs = 20)
@@ -197,6 +261,70 @@ suite "storage backends":
     check processOne()
     check not processOne()
     check backendHits == @["fail", "fail"]
+
+  test "memory backend lists and deletes failed jobs":
+    initQuee(dbPath, backendKind = bkMemory, maxAttempts = 1, retryDelayMs = 0)
+    let job = backendAlwaysFail.enqueue().run()
+
+    check processOne()
+    let failed = listFailedJobs()
+    check failed.len == 1
+    check failed[0].id == job.id
+    check failed[0].queue == "default"
+    check failed[0].taskName == "backendAlwaysFail"
+    check failed[0].attempts == 1
+    check failed[0].lastError == "permanent failure"
+    check failed[0].payload["id"].getStr() == job.id
+
+    check deleteFailedJob(job.id)
+    check listFailedJobs().len == 0
+    check not deleteFailedJob(job.id)
+
+  test "memory backend retries failed jobs through public API":
+    initQuee(dbPath, backendKind = bkMemory, maxAttempts = 1, retryDelayMs = 0)
+    let job = backendFlaky.enqueue().run()
+
+    check processOne()
+    check listFailedJobs().len == 1
+    check retryFailedJob(job.id)
+    check listFailedJobs().len == 0
+    check processOne()
+    check backendHits == @["attempt", "attempt"]
+    check not processOne()
+
+  test "memory backend manages failed jobs by queue":
+    initQuee(dbPath, queues = ["default", "emails"], backendKind = bkMemory, maxAttempts = 1, retryDelayMs = 0)
+    let defaultJob = backendAlwaysFail.enqueue().run()
+    let emailJob = backendAlwaysFail.enqueue(queue = "emails").run()
+
+    check processOne()
+    check processOne()
+    check listFailedJobs().len == 2
+    check listFailedJobs(queue = "default").len == 1
+    check listFailedJobs(queue = "emails").len == 1
+    check listFailedJobs(queue = "default")[0].id == defaultJob.id
+    check listFailedJobs(queue = "emails")[0].id == emailJob.id
+
+    check not retryFailedJob(defaultJob.id, queue = "emails")
+    check retryFailedJob(emailJob.id, queue = "emails")
+    check listFailedJobs(queue = "emails").len == 0
+    check listFailedJobs(queue = "default").len == 1
+
+    check not deleteFailedJob(emailJob.id, queue = "emails")
+    check deleteFailedJob(defaultJob.id, queue = "default")
+    check listFailedJobs().len == 0
+
+  test "memory failed-job API handles empty ids and unknown queues":
+    initQuee(dbPath, backendKind = bkMemory)
+
+    check not retryFailedJob("")
+    check not deleteFailedJob("")
+    expect ValueError:
+      discard listFailedJobs(queue = "missing")
+    expect ValueError:
+      discard retryFailedJob("job", queue = "missing")
+    expect ValueError:
+      discard deleteFailedJob("job", queue = "missing")
 
   test "memory backend retries expired leased jobs":
     initQuee(dbPath, backendKind = bkMemory, jobLeaseTimeoutMs = 20)

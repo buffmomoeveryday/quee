@@ -234,6 +234,14 @@ proc jobIsRunning(jobId: string): bool =
   withCancellationLock:
     result = jobId in runningJobs
 
+proc managementQueues(queue: string): seq[string] =
+  if queue.len > 0:
+    if queue notin queeRegistry.queuePaths:
+      raise newException(ValueError, "Unknown queue: '" & queue & "'")
+    result.add(queue)
+  else:
+    result = queeRegistry.queues
+
 proc blockedTaskNames*(): seq[string] {.gcsafe.} =
   ## Task names whose per-task concurrency limit is currently full.
   {.cast(gcsafe).}:
@@ -252,13 +260,7 @@ proc cancelJob*(jobId: string; queue: string = ""): bool =
   if jobId.len == 0:
     return false
 
-  var queues: seq[string] = @[]
-  if queue.len > 0:
-    if queue notin queeRegistry.queuePaths:
-      raise newException(ValueError, "Unknown queue: '" & queue & "'")
-    queues.add(queue)
-  else:
-    queues = queeRegistry.queues
+  let queues = managementQueues(queue)
 
   var removed = false
   withQueeDbLock:
@@ -278,6 +280,44 @@ proc cancelJob*(jobId: string; queue: string = ""): bool =
 
   clearJobCancellation(jobId)
   false
+
+proc listFailedJobs*(queue: string = ""): seq[FailedJob] =
+  ## List jobs that exhausted their retry budget and remain in failed state.
+  ##
+  ## When ``queue`` is empty, all configured queues are searched.
+  let queues = managementQueues(queue)
+  withQueeDbLock:
+    let backend = currentBackend()
+    for queueName in queues:
+      result.add(backend.listFailed(queueName))
+
+proc retryFailedJob*(jobId: string; queue: string = ""): bool =
+  ## Move a failed job back to the queued state with a fresh retry budget.
+  ##
+  ## When ``queue`` is empty, all configured queues are searched.
+  if jobId.len == 0:
+    return false
+
+  let queues = managementQueues(queue)
+  withQueeDbLock:
+    let backend = currentBackend()
+    for queueName in queues:
+      if backend.retryFailed(queueName, jobId):
+        return true
+
+proc deleteFailedJob*(jobId: string; queue: string = ""): bool =
+  ## Delete a failed job without retrying it.
+  ##
+  ## When ``queue`` is empty, all configured queues are searched.
+  if jobId.len == 0:
+    return false
+
+  let queues = managementQueues(queue)
+  withQueeDbLock:
+    let backend = currentBackend()
+    for queueName in queues:
+      if backend.deleteFailed(queueName, jobId):
+        return true
 
 proc discardMissedJobs*(): int =
   ## Drop jobs that are already due without running them.
