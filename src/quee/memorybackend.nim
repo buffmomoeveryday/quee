@@ -181,6 +181,23 @@ method deleteFailed*(backend: MemoryBackend; queue: string; jobId: string): bool
         backend.jobs.delete(i)
         return true
 
+method listJobs*(backend: MemoryBackend; queue: string): seq[JobSnapshot] {.gcsafe.} =
+  {.cast(gcsafe).}:
+    for job in backend.jobs:
+      if job.queue == queue:
+        result.add(JobSnapshot(
+          id: job.payload["id"].getStr(),
+          queue: job.queue,
+          taskName: job.payload["taskName"].getStr(),
+          state: job.state,
+          priority: jobPriority(job.payload),
+          attempts: job.attempts,
+          runAt: job.payload["runAt"].getFloat(),
+          leasedUntilMs: job.leasedUntil,
+          lastError: job.lastError,
+          payload: job.payload,
+        ))
+
 method discardMissed*(backend: MemoryBackend; queue: string): int {.gcsafe.} =
   {.cast(gcsafe).}:
     var kept: seq[MemoryJob] = @[]

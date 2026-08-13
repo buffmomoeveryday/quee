@@ -1,4 +1,4 @@
-import std/[json, os, strutils, times, unittest]
+import std/[json, os, sequtils, strutils, times, unittest]
 import db_connector/db_sqlite
 import quee
 import helpers
@@ -115,6 +115,26 @@ suite "storage backends":
     check deleteFailedJob(job.id)
     check listFailedJobs().len == 0
     check not deleteFailedJob(job.id)
+
+  test "sqlite backend exposes job snapshots and queue stats":
+    initQuee(dbPath, backendKind = bkSqlite)
+    let queuedJob = backendLow.enqueue().run()
+    let scheduledJob = backendDelayed.enqueue().after(1.hours)
+    var claimed: ClaimedJob
+    withQueeDbLock:
+      claimed = currentBackend().claimDue("default", @[], jobLeaseTimeout())
+
+    let jobs = listJobs()
+    check jobs.len == 2
+    check jobs.anyIt(it.id == queuedJob.id and it.state == "running")
+    check jobs.anyIt(it.id == scheduledJob.id and it.state == "queued")
+
+    let stats = queueStats()
+    check stats.len == 1
+    check stats[0].running == 1
+    check stats[0].scheduled == 1
+    check stats[0].queued == 0
+    check claimed.id == queuedJob.id
 
   test "sqlite backend retries failed jobs through public API":
     initQuee(dbPath, backendKind = bkSqlite, maxAttempts = 1, retryDelayMs = 0)
@@ -279,6 +299,26 @@ suite "storage backends":
     check deleteFailedJob(job.id)
     check listFailedJobs().len == 0
     check not deleteFailedJob(job.id)
+
+  test "memory backend exposes job snapshots and queue stats":
+    initQuee(dbPath, backendKind = bkMemory)
+    let queuedJob = backendLow.enqueue().run()
+    let scheduledJob = backendDelayed.enqueue().after(1.hours)
+    var claimed: ClaimedJob
+    withQueeDbLock:
+      claimed = currentBackend().claimDue("default", @[], jobLeaseTimeout())
+
+    let jobs = listJobs()
+    check jobs.len == 2
+    check jobs.anyIt(it.id == queuedJob.id and it.state == "running")
+    check jobs.anyIt(it.id == scheduledJob.id and it.state == "queued")
+
+    let stats = queueStats()
+    check stats.len == 1
+    check stats[0].running == 1
+    check stats[0].scheduled == 1
+    check stats[0].queued == 0
+    check claimed.id == queuedJob.id
 
   test "memory backend retries failed jobs through public API":
     initQuee(dbPath, backendKind = bkMemory, maxAttempts = 1, retryDelayMs = 0)

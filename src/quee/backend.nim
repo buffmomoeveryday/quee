@@ -1,4 +1,5 @@
 import std/[json, strformat]
+import ./types
 
 type
   BackendKind* = enum
@@ -101,6 +102,10 @@ method retryFailed*(backend: QueueBackend; queue: string; jobId: string): bool {
 method deleteFailed*(backend: QueueBackend; queue: string; jobId: string): bool {.base, gcsafe.} =
   ## Delete a terminal failed job. Return false if not found or unsupported.
   false
+
+method listJobs*(backend: QueueBackend; queue: string): seq[JobSnapshot] {.base, gcsafe.} =
+  ## Return read-only job snapshots for ``queue``. Unsupported backends return an empty list.
+  @[]
 
 method discardMissed*(backend: QueueBackend; queue: string): int {.base, gcsafe.} =
   ## Drop/advance jobs that were due before startup without running them.

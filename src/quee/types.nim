@@ -9,6 +9,28 @@ type
     defaultPriority*: int
     taskConcurrency*: int
 
+  JobSnapshot* = object
+    ## Read-only job data for monitoring and operator views.
+    id*: string
+    queue*: string
+    taskName*: string
+    state*: string
+    priority*: int
+    attempts*: int
+    runAt*: float
+    leasedUntilMs*: int64
+    lastError*: string
+    payload*: JsonNode
+
+  QueueStats* = object
+    ## Aggregated queue state for monitoring.
+    name*: string
+    queued*: int
+    running*: int
+    failed*: int
+    scheduled*: int
+    paused*: bool
+
   ScheduleKind* = enum
     skOnce
     skCron
@@ -60,3 +82,7 @@ type
     maxAttempts*: int
     retryDelayMs*: int
     retryBackoff*: float
+    monitoringDashboardEnabled*: bool
+    monitoringDashboardHost*: string
+    monitoringDashboardPort*: int
+    monitoringDashboardPath*: string

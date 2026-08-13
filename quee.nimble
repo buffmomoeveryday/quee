@@ -14,6 +14,7 @@ requires "nim >= 2.2.6"
 requires "malebolgia >= 0.1.0"
 requires "db_connector"
 requires "mummy"
+requires "karax"
 
 # Tasks
 task test, "Run the test suite":
@@ -24,6 +25,7 @@ task test, "Run the test suite":
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_imported_tasks.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_priority.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_cancel.nim"
+  exec "nim c -r --threads:on --mm:arc --path:src tests/test_dashboard.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_task_concurrency.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_poll.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_concurrency.nim"
