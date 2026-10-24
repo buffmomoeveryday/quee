@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.3.1"
+version       = "0.4.0"
 author        = "Siddhartha Khanal"
 description   = "Lightweight background job queue for Nim with fluent scheduling"
 license       = "MIT"
