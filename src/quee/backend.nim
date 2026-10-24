@@ -87,6 +87,21 @@ method renewLease*(
   ## Extend a leased job owned by the current lease token.
   false
 
+method saveCheckpoint*(
+  backend: QueueBackend;
+  queue: string;
+  jobId: string;
+  leaseId: string;
+  name: string;
+  checkpointResult: JsonNode;
+  leaseTimeoutMs: int;
+): bool {.base, gcsafe.} =
+  ## Append one completed checkpoint to a leased job and extend its lease.
+  ##
+  ## Return false when ``leaseId`` does not own the job. Custom backends must
+  ## override this; the default saves nothing.
+  false
+
 method cancel*(backend: QueueBackend; queue: string; jobId: string): bool {.base, gcsafe.} =
   ## Remove a queued job by id. Return false if not found or unsupported.
   false

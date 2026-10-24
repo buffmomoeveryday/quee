@@ -1,5 +1,5 @@
 import std/[json, os, strutils, tables]
-import ./[types, backend, registry, schedule, log, dashboard]
+import ./[types, backend, registry, schedule, log, dashboard, checkpoint]
 
 var workerThreads: seq[Thread[void]]
 var workersRunning = false
@@ -8,7 +8,9 @@ proc nextRecurringPayload(payload: JsonNode): JsonNode =
   let sched = scheduleFromJson(payload["schedule"])
   if sched.kind == skOnce:
     return payload
-  result = payload
+  result = payload.copy()
+  if "checkpoints" in result:
+    result.delete("checkpoints")
   result["runAt"] = %computeNextRunAt(sched)
 
 proc processOneInQueue(queue: string): bool =
@@ -34,6 +36,7 @@ proc processOneInQueue(queue: string): bool =
     else: JobSchedule(kind: skOnce)
 
   try:
+    beginCheckpoints(payload)
     {.cast(gcsafe).}:
       if hasKey(queeRegistry.handlers, runningTaskName):
         queeRegistry.handlers[runningTaskName](payload["args"])
@@ -64,6 +67,7 @@ proc processOneInQueue(queue: string): bool =
         msg,
       )
   finally:
+    clearCheckpoints()
     if runningJobId.len > 0:
       unmarkJobRunning(runningJobId, runningTaskName)
       clearJobCancellation(runningJobId)

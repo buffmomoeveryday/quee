@@ -32,3 +32,13 @@ proc runBuiltInBackend(name: string; kind: BackendKind) =
 
 runBuiltInBackend("sqlite", bkSqlite)
 runBuiltInBackend("memory", bkMemory)
+
+# Custom backends must also implement saveCheckpoint so a task can resume after
+# a crash. Return false when the lease no longer owns the job. See the README
+# method next to renewLease:
+#
+# method saveCheckpoint(
+#   backend: RedisBackend; queue, jobId, leaseId, name: string;
+#   checkpointResult: JsonNode; leaseTimeoutMs: int
+# ): bool {.gcsafe.} =
+#   discard # append {"name", "result"} to the leased payload and extend the lease

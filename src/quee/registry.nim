@@ -1,4 +1,4 @@
-import std/[locks, random, tables, terminal, times]
+import std/[json, locks, random, tables, terminal, times]
 import ./[types, log, priority, backend, memorybackend, sqlitebackend]
 
 var activeBackend: QueueBackend
@@ -259,6 +259,21 @@ proc renewLease*(): bool {.gcsafe.} =
     return false
   withQueeDbLock:
     result = currentBackend().renewLease(queue, jobId, leaseId, jobLeaseTimeout())
+
+proc saveJobCheckpoint*(name: string; value: JsonNode): bool {.gcsafe.} =
+  ## Append a checkpoint to the current job and extend its lease.
+  ##
+  ## Returns false outside a running job or when this handler no longer owns
+  ## the active lease.
+  let jobId = currentJobId
+  let queue = currentQueue
+  let leaseId = currentLeaseId
+  if jobId.len == 0 or queue.len == 0 or leaseId.len == 0:
+    return false
+  withQueeDbLock:
+    result = currentBackend().saveCheckpoint(
+      queue, jobId, leaseId, name, value, jobLeaseTimeout(),
+    )
 
 proc requestJobCancellation(jobId: string) =
   withCancellationLock:

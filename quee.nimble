@@ -29,6 +29,7 @@ task test, "Run the test suite":
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_task_concurrency.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_poll.nim"
   exec "nim c -r --threads:on --mm:arc --path:src tests/test_concurrency.nim"
+  exec "nim c -r --threads:on --mm:arc --path:src tests/test_checkpoint.nim"
 
 task bench, "Run benchmarks":
   exec "nim c --threads:on --mm:arc --path:src -o:benchmarks/bench_quee benchmarks/bench_quee.nim"
@@ -47,6 +48,7 @@ task buildExamples, "Build all examples":
   exec "nim c --threads:on --mm:arc --path:src src/examples/workerConfigExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/deployUpdateExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/cancellationExample.nim"
+  exec "nim c --threads:on --mm:arc --path:src src/examples/checkpointExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/backendExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/concurrencyExample.nim"
   exec "nim c --threads:on --mm:arc --path:src src/examples/exampleScheduler.nim"

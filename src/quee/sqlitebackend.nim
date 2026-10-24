@@ -358,6 +358,56 @@ method fail*(
       db.execSql(sql"ROLLBACK")
       raise
 
+proc appendCheckpoint(payload: JsonNode; name: string; checkpointResult: JsonNode) =
+  if "checkpoints" notin payload or payload["checkpoints"].kind != JArray:
+    payload["checkpoints"] = newJArray()
+  var entry = newJObject()
+  entry["name"] = newJString(name)
+  entry["result"] =
+    if checkpointResult == nil: newJNull()
+    else: checkpointResult.copy()
+  payload["checkpoints"].add(entry)
+
+method saveCheckpoint*(
+  backend: SqliteBackend;
+  queue: string;
+  jobId: string;
+  leaseId: string;
+  name: string;
+  checkpointResult: JsonNode;
+  leaseTimeoutMs: int;
+): bool {.gcsafe.} =
+  {.cast(gcsafe).}:
+    let db = backend.requireDb()
+    let leasedUntil = nowMillis() + leaseTimeoutMs.int64
+    db.execSql(sql"BEGIN IMMEDIATE")
+    try:
+      var storageKey = ""
+      var rawPayload = ""
+      for row in db.fastRows(
+        sql"SELECT storage_key, payload, lease_id FROM jobs WHERE queue = ? AND state = 'running'",
+        queue,
+      ):
+        if row[2] == leaseId and jobIdFromPayload(row[1]) == jobId:
+          storageKey = row[0]
+          rawPayload = row[1]
+          break
+      if storageKey.len > 0:
+        var payload = parseJson(rawPayload)
+        payload.appendCheckpoint(name, checkpointResult)
+        db.execSql(
+          sql"UPDATE jobs SET payload = ?, leased_until = ? WHERE queue = ? AND storage_key = ?",
+          $payload,
+          $leasedUntil,
+          queue,
+          storageKey,
+        )
+        result = true
+      db.execSql(sql"COMMIT")
+    except CatchableError:
+      db.execSql(sql"ROLLBACK")
+      raise
+
 method renewLease*(
   backend: SqliteBackend; queue: string; jobId: string; leaseId: string; leaseTimeoutMs: int
 ): bool {.gcsafe.} =

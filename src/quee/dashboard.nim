@@ -1,7 +1,7 @@
 import std/[base64, os, sequtils, strformat, strutils, times]
 import karax/[karaxdsl, vdom]
 import mummy, mummy/routers
-import ./[dashboardstyles, registry, types]
+import ./[checkpoint, dashboardstyles, registry, types]
 
 type
   DashboardServerConfig = object
@@ -207,7 +207,7 @@ proc renderJobs*(basePath, queueFilter, stateFilter: string): string =
       table(class = "min-w-full divide-y divide-slate-100"):
         thead(class = "bg-slate-50"):
           tr:
-            for name in ["Job", "Task", "Queue", "State", "Priority", "Attempts", "Run At", "Error", "Actions"]:
+            for name in ["Job", "Task", "Queue", "State", "Priority", "Attempts", "Checkpoint", "Run At", "Error", "Actions"]:
               th(class = "px-5 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500"):
                 text name
         tbody(class = "divide-y divide-slate-100"):
@@ -225,6 +225,8 @@ proc renderJobs*(basePath, queueFilter, stateFilter: string): string =
                 text $job.priority
               td(class = "px-5 py-3 tabular-nums"):
                 text $job.attempts
+              td(class = "px-5 py-3"):
+                text lastCheckpointName(job.payload)
               td(class = "px-5 py-3 text-sm text-slate-600"):
                 text formatTime(job.runAt)
               td(class = "px-5 py-3 max-w-xs truncate text-sm text-slate-600"):
