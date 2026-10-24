@@ -8,6 +8,7 @@ A lightweight background job queue for Nim. Define tasks with a macro, enqueue w
 - **Fluent scheduling** — run now, delay, intervals, cron, daily/weekly
 - **Durable storage** — jobs survive process restarts with the built-in SQLite backend
 - **At-least-once delivery** — claimed jobs use leases, bounded retries, backoff, and failed state
+- **Checkpoints** — completed steps are stored on the job and skipped when a retry or restart resumes it
 - **In-memory storage** — run without disk persistence for tests and ephemeral workloads
 - **Pluggable backends** — provide a `QueueBackend` for Redis, Postgres, or another store
 - **Background workers** — configurable thread pool (`concurrency`, like Celery `-c`) and poll interval
@@ -148,7 +149,7 @@ PRAGMA temp_store = MEMORY;
 
 With the SQLite backend, queued jobs are persisted until a worker leases them. A successful handler completes the lease and deletes the one-shot job. A failed handler records the exception message and retries the job after the configured delay/backoff. If attempts are exhausted, the job moves to `failed`. If a process crashes after leasing a job but before completion, another worker can claim it after the lease timeout.
 
-This is an **at-least-once** guarantee: a job should not be lost after it is durably enqueued, but it may run more than once after a crash, timeout, or retry. Task handlers should therefore be idempotent when they perform external side effects.
+This is an **at-least-once** guarantee: a job should not be lost after it is durably enqueued, but it may run more than once after a crash, timeout, or retry. Task handlers should therefore be idempotent when they perform external side effects. Checkpointed steps that already completed are not run again; the step that was in progress may run more than once.
 
 The default lease timeout is 30 seconds. Set it above the longest expected handler runtime, or call `renewLease()` inside long-running handlers:
 
@@ -177,9 +178,33 @@ setRetryDelay(2_000)
 setRetryBackoff(2.0)
 ```
 
+### Checkpoints
+
+Name a step with `checkpoint`. Quee stores the step name and its JSON result on the job. After a crash, lease timeout, or retry, the worker runs the task again, skips steps that already finished, and continues at the first unfinished step. The unfinished step runs from the start, so that step should be safe to repeat.
+
+```nim
+task importBatch(batchId: string):
+  let count = checkpoint("load"):
+    echo "loading ", batchId
+    3
+
+  checkpoint("write"):
+    echo "writing ", count, " rows"
+
+  for i in 0 ..< count:
+    checkpoint("row:" & $i):
+      echo "row ", i
+```
+
+Calls are replayed in the order they were saved. Asking for a different name raises `CheckpointError`, and the job is retried like any other handler error. Checkpoints cannot be nested. Call `checkpoint` from the worker thread while the job is running; calling it elsewhere raises `CheckpointError`.
+
+A checkpoint result must be JSON-serializable (`int`, `string`, `bool`, `float`, sequences, and objects). A step that returns nothing stores `null`. Saving a checkpoint also extends the job lease. A body that runs longer than the lease should still call `renewLease()` inside it.
+
+Each claim still uses one attempt, including a resume that continues from a checkpoint. `skipMissedJobs` still drops or advances due jobs without running them. The next occurrence of a recurring job starts with an empty checkpoint list. With the in-memory backend, checkpoints last only until the process exits.
+
 The in-memory backend follows the same lease/retry lifecycle while the process is alive, but it is not durable across process exits.
 
-Custom backends subclass `QueueBackend` and pass an instance to `initQuee`. `claimDue` must atomically lease one due job so concurrent workers cannot run the same payload at the same time. Leased jobs must become claimable again after `leaseTimeoutMs` unless `complete` or `renewLease` is called:
+Custom backends subclass `QueueBackend` and pass an instance to `initQuee`. `claimDue` must atomically lease one due job so concurrent workers cannot run the same payload at the same time. Leased jobs must become claimable again after `leaseTimeoutMs` unless `complete`, `renewLease`, or `saveCheckpoint` is called:
 
 ```nim
 import std/json
@@ -226,6 +251,17 @@ method renewLease(
   backend: RedisBackend; queue: string; jobId: string; leaseId: string; leaseTimeoutMs: int
 ): bool {.gcsafe.} =
   discard # extend the lease only if leaseId still owns the job
+
+method saveCheckpoint(
+  backend: RedisBackend;
+  queue: string;
+  jobId: string;
+  leaseId: string;
+  name: string;
+  checkpointResult: JsonNode;
+  leaseTimeoutMs: int;
+): bool {.gcsafe.} =
+  discard # append {"name", "result"} to the leased payload and extend the lease
 
 initQuee("./mydb", backend = RedisBackend())
 ```
@@ -455,6 +491,13 @@ proc renewLease*(): bool
   ## Extend the current running job's lease. Returns false outside a running job
   ## or when this handler no longer owns the active lease.
 
+template checkpoint*(name: string; body: untyped): auto
+  ## Run `body` once for this job. A later retry returns the stored JSON result
+  ## and does not run `body` again. Raises `CheckpointError` outside a job,
+  ## when checkpoints are nested, or when the call order does not match history.
+
+type CheckpointError = object of CatchableError
+
 proc setPollInterval*(ms: int)
   ## Set worker sleep when idle (ms). Minimum 1.
 
@@ -542,6 +585,15 @@ method fail(
 )
 method renewLease(
   backend: QueueBackend; queue: string; jobId: string; leaseId: string; leaseTimeoutMs: int
+): bool
+method saveCheckpoint(
+  backend: QueueBackend;
+  queue: string;
+  jobId: string;
+  leaseId: string;
+  name: string;
+  checkpointResult: JsonNode;
+  leaseTimeoutMs: int;
 ): bool
 method cancel(backend: QueueBackend; queue: string; jobId: string): bool
 method listFailed(backend: QueueBackend; queue: string): seq[FailedJob]

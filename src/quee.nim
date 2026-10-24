@@ -23,6 +23,7 @@ import quee/[
   priority,
   jobkey,
   dashboard,
+  checkpoint,
 ]
 
 export types
@@ -51,3 +52,4 @@ export log
 export priority
 export jobkey
 export dashboard
+export checkpoint

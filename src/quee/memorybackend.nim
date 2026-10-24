@@ -132,6 +132,34 @@ method fail*(
           job.leaseId = ""
         break
 
+proc appendCheckpoint(payload: JsonNode; name: string; checkpointResult: JsonNode) =
+  if "checkpoints" notin payload or payload["checkpoints"].kind != JArray:
+    payload["checkpoints"] = newJArray()
+  var entry = newJObject()
+  entry["name"] = newJString(name)
+  entry["result"] =
+    if checkpointResult == nil: newJNull()
+    else: checkpointResult.copy()
+  payload["checkpoints"].add(entry)
+
+method saveCheckpoint*(
+  backend: MemoryBackend;
+  queue: string;
+  jobId: string;
+  leaseId: string;
+  name: string;
+  checkpointResult: JsonNode;
+  leaseTimeoutMs: int;
+): bool {.gcsafe.} =
+  {.cast(gcsafe).}:
+    let leasedUntil = nowMillis() + leaseTimeoutMs.int64
+    for job in backend.jobs.mitems:
+      if job.queue == queue and job.state == "running" and job.leaseId == leaseId and
+          job.payload["id"].getStr() == jobId:
+        job.payload.appendCheckpoint(name, checkpointResult)
+        job.leasedUntil = leasedUntil
+        return true
+
 method renewLease*(
   backend: MemoryBackend; queue: string; jobId: string; leaseId: string; leaseTimeoutMs: int
 ): bool {.gcsafe.} =
